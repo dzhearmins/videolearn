@@ -1,0 +1,34 @@
+# --- secrets: never commit ---
+.env
+.env.*
+!.env.example
+.state/
+cookies*.json
+*.cookie
+
+# --- generated media / outputs ---
+output/
+downloads/
+tmp/
+*.mp4
+*.m4a
+*.ts
+*.wav
+*.m3u8
+*.srt
+*.vtt
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# --- editors / os ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

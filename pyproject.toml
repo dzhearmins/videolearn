@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pku-videolearn"
+version = "0.1.0"
+description = "PKU Blackboard replay -> transcript -> AI retelling (personal study use)"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.32",
+    "beautifulsoup4>=4.12",
+    "cryptography>=43",
+    "python-dotenv>=1.0",
+    "faster-whisper>=1.1",
+]
+
+[project.scripts]
+videolearn = "videolearn.cli:entry"
+
+[tool.setuptools.packages.find]
+include = ["videolearn*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

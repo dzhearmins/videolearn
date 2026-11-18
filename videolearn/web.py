@@ -21,6 +21,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import traceback
@@ -61,6 +62,9 @@ ARTIFACT_NAMES = {
 MAX_FRAMES = 40
 MAX_BODY = 64 * 1024
 MAX_LIVE_BYTES = 512 * 1024
+
+# 可以被"视频存储"管理的文件名（只认这些，绝不按调用方给的任意路径删）
+VIDEO_NAMES = ("video.mp4", "video.ts", "video.m4a")
 
 # 长任务运行过程中，任务页要边跑边读的产物（先出现的在前）
 LIVE_ARTIFACTS = (
@@ -141,6 +145,7 @@ class Job:
     error: str | None = None
     out_dir: Path | None = None
     share: dict | None = None
+    clean: dict | None = None
     sink: LineSink = field(default_factory=LineSink)
 
     def _fresh(self, path: Path) -> bool:
@@ -193,6 +198,7 @@ class Job:
             "error": self.error,
             "out_dir": str(self.out_dir) if self.out_dir else None,
             "share": self.share,
+            "clean": self.clean,
             "artifacts": self.artifacts(),
         }
 
@@ -379,6 +385,7 @@ class App:
             "ffmpeg": media.find_ffmpeg() is not None,
             "authenticated": self.authenticated(check=check),
             "share": self.share.describe(),
+            "auto_clean_video": self.settings.auto_clean_video,
             "active": active.summary() if active else None,
             "jobs": [j.summary() for j in sorted(self.jobs.values(), key=lambda x: x.created, reverse=True)[:10]],
         }
@@ -470,6 +477,9 @@ class App:
                 threading.Thread(target=self._auto_share, args=(job,), daemon=True).start()
             else:
                 job.share = {"state": "off" if not self.share.enabled else "skipped"}
+            if self.settings.auto_clean_video:
+                job.clean = {"state": "pending"}
+                threading.Thread(target=self._auto_clean, args=(job,), daemon=True).start()
         except BaseException as exc:  # noqa: BLE001 - 含 SystemExit(缺少凭据)
             job.error = f"{type(exc).__name__}: {exc}"
             job.state = "failed"
@@ -536,6 +546,96 @@ class App:
         except BaseException as exc:  # noqa: BLE001 - 上传失败不能影响本地结果
             job.share = {"state": "failed", "message": f"{type(exc).__name__}: {exc}"}
             job.sink.write(f"[share] 自动上传失败（本地结果不受影响）：{type(exc).__name__}: {exc}\n")
+
+    # ---- 视频存储 ----
+    def storage(self) -> dict:
+        """列出 output/ 下所有已下载的视频；这是首页"视频存储"的唯一数据源。"""
+        root = self.settings.output_dir
+        items: list[dict] = []
+        if root.is_dir():
+            for p in root.rglob("video.*"):
+                if not p.is_file() or p.name not in VIDEO_NAMES:
+                    continue
+                try:
+                    st = p.stat()
+                    rel = p.relative_to(root).as_posix()
+                    rel_dir = p.parent.relative_to(root).as_posix()
+                except (OSError, ValueError):
+                    continue
+                parts = [x for x in rel_dir.split("/") if x]
+                items.append(
+                    {
+                        "rel": rel,
+                        "course": parts[0] if len(parts) >= 2 else "",
+                        "title": parts[-1] if parts else "",
+                        "bytes": st.st_size,
+                        "mtime": st.st_mtime,
+                        "in_use": False,
+                    }
+                )
+        items.sort(key=lambda x: x["mtime"], reverse=True)
+
+        active = self.jobs.get(self.current) if self.current else None
+        active_dir = active.out_dir.resolve() if active and active.out_dir else None
+        for item in items:
+            item_dir = (root / item["rel"]).parent.resolve()
+            item["in_use"] = bool(active_dir and item_dir == active_dir)
+
+        total = sum(i["bytes"] for i in items)
+        try:
+            free = shutil.disk_usage(root if root.exists() else root.parent).free
+        except OSError:
+            free = 0
+        return {
+            "items": items,
+            "total_bytes": total,
+            "free_bytes": free,
+            "output_dir": str(root),
+            "auto_cleanup": self.settings.auto_clean_video,
+        }
+
+    def delete_video(self, rel: str) -> dict:
+        """只删"当前列表里真实存在"的视频；不信任调用方给的任意路径。"""
+        rel = (rel or "").strip()
+        if not rel or rel.startswith("/") or "\\" in rel or ".." in rel.split("/"):
+            raise ApiError(400, "路径不合法")
+        root = self.settings.output_dir.resolve()
+        target = (root / rel).resolve()
+        if not target.is_relative_to(root) or target.name not in VIDEO_NAMES:
+            raise ApiError(400, "路径不合法")
+        if rel not in {i["rel"] for i in self.storage()["items"]}:
+            raise ApiError(404, "文件不存在")
+
+        active = self.jobs.get(self.current) if self.current else None
+        if active and active.out_dir and target.parent == active.out_dir.resolve():
+            raise ApiError(409, "这个视频正被当前任务使用，等它结束再删")
+
+        try:
+            size = target.stat().st_size
+            target.unlink()
+        except FileNotFoundError:
+            size = 0
+        return {"freed_bytes": size, "storage": self.storage()}
+
+    def _auto_clean(self, job: Job) -> None:
+        """任务完成后删除它自己下载的视频（只在设置开启时调用）。"""
+        try:
+            if not job.out_dir:
+                return
+            freed = 0
+            for name in VIDEO_NAMES:
+                p = job.out_dir / name
+                if p.is_file():
+                    freed += p.stat().st_size
+                    p.unlink()
+            job.clean = {"state": "done" if freed else "skipped", "freed_bytes": freed}
+            if freed:
+                job.sink.write(
+                    f"[clean] 已自动删除视频，释放 {max(1, freed // 1024 // 1024)} MB\n"
+                )
+        except BaseException as exc:  # noqa: BLE001 - 清理失败不能影响任务结果
+            job.clean = {"state": "failed", "message": f"{type(exc).__name__}: {exc}"}
+            job.sink.write(f"[clean] 自动删除视频失败：{type(exc).__name__}: {exc}\n")
 
 
 # --------------------------------------------------------------------------
@@ -673,6 +773,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._videos(query)
             elif path == "/api/jobs":
                 self._jobs_list(query)
+            elif path == "/api/storage":
+                self._json(self.app.storage())
             elif path.startswith("/api/jobs/"):
                 self._job_route(path, query)
             else:
@@ -701,6 +803,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._share_register(body)
             elif parsed.path == "/api/jobs":
                 self._start(body)
+            elif parsed.path == "/api/storage/delete":
+                rel = str(body.get("rel") or "")
+                self._json({"ok": True, **self.app.delete_video(rel)})
             else:
                 self._json({"error": "not_found"}, 404)
         except ApiError as exc:
@@ -786,6 +891,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _settings(self, body: dict) -> None:
         updates: dict[str, str] = {}
+        if "auto_cleanup" in body and body["auto_cleanup"] is not None:
+            updates["VIDEOLRN_AUTO_CLEAN_VIDEO"] = "1" if body["auto_cleanup"] else "0"
         mapping = {
             "student_id": "PKU_STUDENT_ID",
             "password": "PKU_PASSWORD",

@@ -33,6 +33,3 @@ venv/
 .idea/
 Thumbs.db
 desktop.ini
-
-# --- tests ---
-tests/

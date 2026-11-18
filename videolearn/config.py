@@ -26,6 +26,7 @@ class Settings:
     share_server: str = ""
     share_token: str = ""
     share_name: str = ""
+    auto_clean_video: bool = False
     state_dir: Path = field(default=STATE_DIR)
     output_dir: Path = field(default=OUTPUT_DIR)
 
@@ -57,4 +58,6 @@ def load_settings() -> Settings:
         share_server=os.getenv("SHARE_SERVER", "").strip().rstrip("/"),
         share_token=os.getenv("SHARE_TOKEN", "").strip(),
         share_name=os.getenv("SHARE_NAME", "").strip(),
+        auto_clean_video=os.getenv("VIDEOLRN_AUTO_CLEAN_VIDEO", "").strip().lower()
+        in ("1", "true", "yes", "on"),
     )

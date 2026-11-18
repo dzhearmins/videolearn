@@ -58,6 +58,13 @@
   .options { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px 14px; margin-bottom: 14px; }
   .options label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
   .options input { accent-color: var(--accent); }
+  .storage-list { max-height: 340px; overflow: auto; padding: 4px 8px 8px; }
+  .storage-row { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  .storage-row:last-child { border-bottom: 0; }
+  .storage-row .smeta { flex: 1; min-width: 0; }
+  .storage-row .stitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .storage-row .ssub { color: var(--muted); font-size: 12px; }
+  .storage-row button { font-size: 12px; padding: 4px 10px; }
   #video-list { padding: 6px 8px 10px; }
   .video {
     display: flex; align-items: center; gap: 12px; padding: 10px; border-radius: 8px;
@@ -152,6 +159,8 @@
     font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
     border-radius: 8px; padding: 8px 10px;
   }
+  dialog label.check { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 13px; }
+  dialog label.check input { accent-color: var(--accent); }
   .row { display: flex; gap: 10px; justify-content: flex-end; }
   .share-box {
     border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
@@ -205,6 +214,16 @@
       <div class="card">
         <h2>回放</h2>
         <div id="video-list"><div class="empty">先选一门课</div></div>
+      </div>
+
+      <div class="card" id="storage-card">
+        <div class="card-head">
+          <strong>视频存储</strong>
+          <span id="storage-summary" class="hint"></span>
+          <span class="spacer"></span>
+          <button id="storage-refresh">刷新</button>
+        </div>
+        <div id="storage-list" class="storage-list"><div class="empty">加载中…</div></div>
       </div>
     </section>
   </div>
@@ -290,6 +309,8 @@
         <option value="large-v3">large-v3（很慢）</option>
       </select>
     </label>
+
+    <label class="check"><input type="checkbox" name="auto_cleanup"> 任务完成后自动删除视频（默认关闭）</label>
 
     <fieldset class="share-box">
       <legend>共享总结（可选）</legend>
@@ -533,6 +554,63 @@ function renderVideos() {
   }
 }
 
+// ---------------------------------------------------------------- 视频存储
+async function loadStorage() {
+  try {
+    renderStorage(await api('/api/storage'));
+  } catch (e) {
+    $('storage-list').innerHTML = '<div class="empty">读取失败</div>';
+  }
+}
+
+function renderStorage(data) {
+  const items = data.items || [];
+  $('storage-summary').textContent = items.length
+    ? `共 ${items.length} 个 · ${fmtSize(data.total_bytes)} · 磁盘剩余 ${fmtSize(data.free_bytes)}`
+    : `没有已下载的视频 · 磁盘剩余 ${fmtSize(data.free_bytes)}`;
+  const box = $('storage-list');
+  box.textContent = '';
+  if (!items.length) { box.innerHTML = '<div class="empty">没有已下载的视频</div>'; return; }
+  for (const it of items) {
+    const row = document.createElement('div');
+    row.className = 'storage-row';
+    const meta = document.createElement('div');
+    meta.className = 'smeta';
+    const title = document.createElement('div');
+    title.className = 'stitle';
+    title.textContent = [it.course, it.title].filter(Boolean).join(' / ') || it.rel;
+    const sub = document.createElement('div');
+    sub.className = 'ssub';
+    const when = it.mtime ? new Date(it.mtime * 1000).toLocaleString() : '';
+    sub.textContent = [fmtSize(it.bytes), when, it.in_use ? '使用中' : ''].filter(Boolean).join(' · ');
+    meta.append(title, sub);
+    const del = document.createElement('button');
+    del.textContent = '删除';
+    del.disabled = !!it.in_use;
+    del.onclick = () => deleteVideo(it, del);
+    row.append(meta, del);
+    box.append(row);
+  }
+}
+
+async function deleteVideo(item, btn) {
+  if (!confirm(`删除这个视频？\n${item.rel}\n可释放 ${fmtSize(item.bytes)}`)) return;
+  btn.disabled = true;
+  btn.textContent = '删除中…';
+  try {
+    const data = await api('/api/storage/delete', {
+      method: 'POST',
+      body: JSON.stringify({ rel: item.rel }),
+    });
+    toast(`已删除，释放 ${fmtSize(data.freed_bytes)}`, true);
+    renderStorage(data.storage);
+  } catch (e) {
+    toast('删除失败：' + e.message);
+    btn.disabled = false;
+    btn.textContent = '删除';
+  }
+}
+
 async function startJob(v, btn) {
   btn.disabled = true;
   try {
@@ -617,6 +695,7 @@ function showHome() {
   $('view-home').hidden = false;
   if (app.course) renderVideos();
   updateQueueBanner();
+  loadStorage();
 }
 
 function updateQueueBanner() {
@@ -1068,6 +1147,7 @@ $('btn-settings').onclick = async () => {
     f.api_key.placeholder = s.api_key ? ('已保存 ' + s.api_key + '（留空不改）') : 'sk-...';
     f.llm_model.value = s.llm_model || '';
     f.whisper_model.value = '';
+    f.auto_cleanup.checked = !!s.auto_clean_video;
     if (s.share) {
       f.share_server.value = s.share.server || '';
       f.share_name.value = s.share.name || '';
@@ -1089,6 +1169,7 @@ $('settings-form').addEventListener('submit', async (ev) => {
     password: f.password.value,
     api_key: f.api_key.value.trim(),
     llm_model: f.llm_model.value.trim(),
+    auto_cleanup: f.auto_cleanup.checked,
   };
   if (f.whisper_model.value) body.whisper_model = f.whisper_model.value;
   for (const k of Object.keys(body)) if (body[k] === '') delete body[k];
@@ -1143,6 +1224,7 @@ $('queue-open').onclick = () => {
 $('opt-sample').onchange = () => {
   if ($('opt-sample').checked) toast(`只转写前 ${SAMPLE_SECONDS} 秒，用于快速验证效果`);
 };
+$('storage-refresh').onclick = loadStorage;
 window.addEventListener('hashchange', route);
 
 // ---------------------------------------------------------------- 启动

@@ -26,7 +26,7 @@ import requests
 
 from . import asr, llm
 from .config import Settings
-from .media import find_ffmpeg
+from .media import find_ffmpeg, find_ffprobe
 
 SYSTEM_RESTATE = (
     "你是课堂助教。把这段课堂转写改写成连贯、忠实的中文重述：保留定义、定理、公式（LaTeX）"
@@ -170,10 +170,12 @@ def run_streaming(
     if not settings.llm_key:
         raise RuntimeError("流式需要 LLM Key")
 
-    ffprobe = Path(ffmpeg).with_name("ffprobe.exe")
+    ffprobe = find_ffprobe(ffmpeg)
+    if not ffprobe:
+        raise RuntimeError("流式需要 ffprobe（通常与 ffmpeg 一起安装）")
     total_dur = float(
         subprocess.run(
-            [str(ffprobe), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video_path)],
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video_path)],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
     )

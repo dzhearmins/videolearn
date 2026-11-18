@@ -1,0 +1,1159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>回放课程 helper</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1c1f23; --muted: #6b7280;
+    --line: #e3e6ea; --accent: #2f6fed; --ok: #1a7f37; --warn: #9a6700; --bad: #b42318;
+    --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --card: #1b1e23; --ink: #e6e8eb; --muted: #9aa3ad;
+      --line: #2a2f36; --accent: #6e9bff; --ok: #4ac26b; --warn: #d4a72c; --bad: #ff7b72;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .spacer { flex: 1; }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--card);
+    color: var(--ink); padding: 6px 12px; border-radius: 8px;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.05); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .pill {
+    font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); white-space: nowrap;
+  }
+  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+  .pill.run { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+  main { padding: 18px 20px 60px; max-width: 1320px; margin: 0 auto; }
+  .home-grid { display: grid; grid-template-columns: 280px 1fr; gap: 18px; }
+  @media (max-width: 860px) { .home-grid, .task-grid { grid-template-columns: 1fr !important; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  h2 { font-size: 12px; letter-spacing: .08em; color: var(--muted); margin: 0; padding: 12px 14px 0; font-weight: 600; text-transform: uppercase; }
+  #course-list { padding: 8px; }
+  .course {
+    display: block; width: 100%; text-align: left; border: 1px solid transparent; background: none;
+    padding: 9px 10px; border-radius: 8px; margin-bottom: 2px;
+  }
+  .course:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .course.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+  .course .term { display: block; font-size: 11px; color: var(--muted); }
+  .options { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px 14px; margin-bottom: 14px; }
+  .options label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  .options input { accent-color: var(--accent); }
+  #video-list { padding: 6px 8px 10px; }
+  .video {
+    display: flex; align-items: center; gap: 12px; padding: 10px; border-radius: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .video:last-child { border-bottom: 0; }
+  .video .meta { flex: 1; min-width: 0; }
+  .video .title { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .video .sub { color: var(--muted); font-size: 12px; }
+  .video .actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .empty { color: var(--muted); padding: 24px 14px; text-align: center; }
+  .queue {
+    display: flex; align-items: center; gap: 10px; margin: 0 0 12px; padding: 10px 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    background: color-mix(in srgb, var(--accent) 7%, var(--card)); border-radius: 10px;
+  }
+  .queue .spacer { flex: 1; }
+
+  /* ---- 任务页 ---- */
+  .task-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  #btn-back { flex-shrink: 0; white-space: nowrap; }
+  #task-state { flex-shrink: 0; }
+  .task-head .titles { flex: 1 1 260px; min-width: 0; }
+  .preview img { max-width: 100%; max-height: 420px; border: 1px solid var(--line); border-radius: 8px; margin: 10px 0 4px; display: block; }
+  .preview .cap { color: var(--muted); font-size: 11px; margin-bottom: 10px; display: block; }
+  .task-title { font-size: 16px; font-weight: 600; }
+  .task-sub { color: var(--muted); font-size: 12px; }
+  .task-grid { display: grid; grid-template-columns: 300px 1fr; gap: 18px; align-items: start; }
+  #task-list { padding: 8px; }
+  .task-item {
+    display: block; width: 100%; text-align: left; border: 1px solid transparent; background: none;
+    padding: 9px 10px; border-radius: 8px; margin-bottom: 2px;
+  }
+  .task-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .task-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+  .task-item .ti-top { display: flex; align-items: center; gap: 8px; }
+  .task-item .ti-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .task-item .ti-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .task-main { display: grid; gap: 14px; }
+  .card-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .card-head .hint { color: var(--muted); font-size: 12px; }
+  .live-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); }
+  @media (max-width: 1000px) { .live-grid { grid-template-columns: 1fr; } }
+  .live-col { background: var(--card); display: flex; flex-direction: column; min-height: 260px; }
+  .col-label { font-size: 12px; color: var(--muted); padding: 8px 14px 0; }
+  .live {
+    margin: 0; padding: 8px 14px 14px; height: 300px; overflow: auto; white-space: pre-wrap;
+    word-break: break-word; font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  }
+  .live.empty-text { color: var(--muted); }
+  .finals { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 12px 14px; }
+  @media (max-width: 900px) { .finals { grid-template-columns: 1fr; } }
+  .final-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .final-card .fc-title { font-weight: 600; }
+  .final-card .fc-desc { color: var(--muted); font-size: 12px; flex: 1; }
+  .final-card .fc-actions { display: flex; gap: 6px; }
+  .final-card.missing { opacity: .55; }
+  #other-artifacts { padding: 0 14px 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+  #other-artifacts:empty { display: none; }
+  .eyes-body { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
+  .eyes-body:empty { display: none; }
+  .eyes-body img { height: 120px; border: 1px solid var(--line); border-radius: 8px; display: block; }
+  .art {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; text-decoration: none;
+    color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px;
+  }
+  .art:hover { border-color: var(--accent); color: var(--accent); }
+  .art .sz { color: var(--muted); }
+  .preview { margin: 0; padding: 0 14px 14px; max-height: 460px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; }
+  .log-card { overflow: hidden; }
+  .log-card summary { cursor: pointer; padding: 10px 14px; color: var(--muted); font-size: 12px; }
+  .log {
+    font-family: var(--mono); font-size: 12px; line-height: 1.55; padding: 0 14px 12px;
+    height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .log .l { display: block; }
+  .log .err { color: var(--bad); }
+  .log .asr { color: var(--accent); }
+  .log .llm { color: var(--ok); }
+  .log .warn { color: var(--warn); }
+  .log .dim { color: var(--muted); }
+
+  dialog {
+    border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--ink);
+    width: min(520px, 92vw); padding: 0;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog form { padding: 16px 18px; display: grid; gap: 12px; }
+  dialog h3 { margin: 0; font-size: 15px; }
+  dialog label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  dialog input, dialog select {
+    font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px;
+  }
+  .row { display: flex; gap: 10px; justify-content: flex-end; }
+  .share-box {
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    display: grid; gap: 10px; margin: 0;
+  }
+  .share-box legend { font-size: 12px; color: var(--muted); padding: 0 6px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 2px 8px;
+    border-radius: 999px; border: 1px solid color-mix(in srgb, var(--ok) 45%, transparent);
+    color: var(--ok); white-space: nowrap;
+  }
+  .hint { font-size: 12px; color: var(--muted); }
+  #toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    background: var(--bad); color: #fff; padding: 8px 16px; border-radius: 999px;
+    font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 80vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.ok { background: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>回放课程 helper</h1>
+  <span id="status-pill" class="pill">检查中…</span>
+  <span class="spacer"></span>
+  <button id="btn-login">登录教学网</button>
+  <button id="btn-settings">设置</button>
+</header>
+
+<main id="view-home">
+  <div class="home-grid">
+    <aside class="card">
+      <h2>课程</h2>
+      <div id="course-list"><div class="empty">登录后加载…</div></div>
+    </aside>
+
+    <section>
+      <div class="card options">
+        <label><input type="checkbox" id="opt-eyes" checked> 眼睛（截图读板书）</label>
+        <label><input type="checkbox" id="opt-stream" checked> 流式初稿</label>
+        <label><input type="checkbox" id="opt-sample"> 只跑前 <span id="opt-sample-secs"></span> 秒（快速验证）</label>
+      </div>
+
+      <div id="queue-banner" class="queue" hidden>
+        <span>已在任务流：<b id="queue-title"></b></span>
+        <span class="spacer"></span>
+        <button id="queue-open" class="primary">查看过程</button>
+      </div>
+
+      <div class="card">
+        <h2>回放</h2>
+        <div id="video-list"><div class="empty">先选一门课</div></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<main id="view-task" hidden>
+  <div class="task-head">
+    <button id="btn-back">← 返回课程</button>
+    <div class="titles">
+      <div class="task-title" id="task-title">任务</div>
+      <div class="task-sub" id="task-sub"></div>
+    </div>
+    <span id="task-state" class="pill">—</span>
+    <span class="spacer"></span>
+    <span id="task-progress" class="hint"></span>
+  </div>
+
+  <div class="task-grid">
+    <aside class="card">
+      <h2>本课任务</h2>
+      <div id="task-list"></div>
+    </aside>
+
+    <section class="task-main">
+      <div class="card">
+        <div class="card-head">
+          <strong>流式结果</strong>
+          <span id="live-hint" class="hint"></span>
+        </div>
+        <div class="live-grid">
+          <div class="live-col">
+            <div class="col-label">初稿（边转写边出稿）</div>
+            <pre id="live-draft" class="live empty-text">还没有开始</pre>
+          </div>
+          <div class="live-col">
+            <div class="col-label">边转写文字稿</div>
+            <pre id="live-partial" class="live empty-text">还没有开始</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="eyes-card" hidden>
+        <div class="card-head">
+          <strong>眼睛</strong>
+          <span id="eyes-hint" class="hint"></span>
+        </div>
+        <div id="eyes-body" class="eyes-body"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <strong>最终结果</strong>
+          <span id="final-hint" class="hint"></span>
+        </div>
+        <div id="final-cards" class="finals"></div>
+        <div id="other-artifacts"></div>
+        <pre id="final-preview" class="preview" hidden></pre>
+      </div>
+
+      <details class="card log-card">
+        <summary>运行日志</summary>
+        <div id="job-log" class="log"></div>
+      </details>
+    </section>
+  </div>
+</main>
+
+<dialog id="settings-dialog">
+  <form method="dialog" id="settings-form">
+    <h3>设置</h3>
+    <p class="hint">保存到项目根目录的 .env。密码和 API Key 只写本机文件，不会出现在日志里。</p>
+    <label>学号 <input name="student_id" autocomplete="username" placeholder="留空则不修改"></label>
+    <label>密码 <input name="password" type="password" autocomplete="current-password" placeholder="留空则不修改"></label>
+    <label>DeepSeek API Key <input name="api_key" type="password" placeholder="留空则不修改"></label>
+    <label>LLM 模型 <input name="llm_model" placeholder="deepseek-chat"></label>
+    <label>转写模型
+      <select name="whisper_model">
+        <option value="">（不修改）</option>
+        <option value="tiny">tiny（最快，最不准）</option>
+        <option value="base">base</option>
+        <option value="small">small（推荐）</option>
+        <option value="medium">medium（更准更慢）</option>
+        <option value="large-v3">large-v3（很慢）</option>
+      </select>
+    </label>
+
+    <fieldset class="share-box">
+      <legend>共享总结（可选）</legend>
+      <label>服务地址 <input name="share_server" placeholder="http://39.97.231.204/vl"></label>
+      <label>邀请码 <input name="share_invite" placeholder="向发起人要一个"></label>
+      <label>你的昵称 <input name="share_name" placeholder="同学A"></label>
+      <button type="button" id="btn-share-register">注册 / 更新共享</button>
+      <p class="hint" id="share-hint">注册后，列表里会标出别人已经分析过的回放；你完成的分析会自动上传（小样除外）。</p>
+    </fieldset>
+
+    <div class="row">
+      <button value="cancel" formnovalidate>取消</button>
+      <button class="primary" value="save" id="settings-save">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+const KEY = __VL_KEY_JSON__;
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// 小样/调试设置：只分析视频开头的这么多秒，便于快速验证效果
+const SAMPLE_SECONDS = 600;
+$('opt-sample-secs').textContent = SAMPLE_SECONDS;
+
+const app = {
+  authenticated: false,
+  courses: [],
+  course: null,          // {key, name, term}
+  videos: [],
+  jobs: new Map(),       // id -> job summary
+  jobId: null,
+  courseKey: null,
+  cursor: 0,
+  pollToken: null,
+  liveToken: null,
+  stage: '',
+  chunks: null,
+  previewedJob: null,
+  eyesFrames: -1,
+  share: {},
+};
+
+function toast(msg, ok) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'show' + (ok ? ' ok' : '');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.className = ''; }, 4200);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'X-VL-Key': KEY, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = { error: '响应不是 JSON' }; }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || res.statusText);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+function fmtSize(n) {
+  if (!n) return '';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(v < 10 && i > 0 ? 1 : 0) + u[i];
+}
+
+function fmtDuration(sec) {
+  if (!sec || sec < 0) return '';
+  const s = Math.round(sec);
+  if (s < 60) return s + ' 秒';
+  const m = Math.floor(s / 60);
+  return m + ' 分 ' + (s % 60) + ' 秒';
+}
+
+function displayTitle(t) {
+  t = (t || '').trim();
+  return (!t || t.startsWith('时间')) ? '（无标题回放）' : t;
+}
+
+const STATE_TEXT = { queued: '排队中', running: '运行中', done: '完成', failed: '失败' };
+
+function statePill(el, st) {
+  el.textContent = STATE_TEXT[st] || st || '—';
+  el.className = 'pill' + (st === 'done' ? ' ok' : st === 'failed' ? ' bad' : st === 'running' ? ' run' : '');
+}
+
+function setPill(text, cls) {
+  const el = $('status-pill');
+  el.textContent = text;
+  el.className = 'pill' + (cls ? ' ' + cls : '');
+}
+
+// ---------------------------------------------------------------- 状态
+async function refreshStatus(check) {
+  try {
+    const s = await api('/api/status' + (check ? '?check=1' : ''));
+    app.authenticated = s.authenticated;
+    app.share = s.share || {};
+    if (!s.has_password) setPill('缺配置 · 点右上角设置', 'bad');
+    else if (!s.authenticated) setPill('未登录', 'bad');
+    else setPill('已登录', 'ok');
+    if (!s.ffmpeg) toast('没找到 ffmpeg，转写会失败');
+    return s;
+  } catch (e) {
+    setPill('服务异常', 'bad');
+    return null;
+  }
+}
+
+async function ensureJobs() {
+  try {
+    const data = await api('/api/jobs');
+    for (const j of (data.jobs || [])) app.jobs.set(j.id, j);
+  } catch (e) { /* 未登录也能看任务，失败就忽略 */ }
+}
+
+// ---------------------------------------------------------------- 首页
+async function loadCourses() {
+  const box = $('course-list');
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const data = await api('/api/courses');
+    app.courses = data.courses || [];
+    app.authenticated = true;
+    setPill('已登录', 'ok');
+    if (!app.courses.length) { box.innerHTML = '<div class="empty">没有课程</div>'; return; }
+    if (!app.course) {
+      const saved = localStorage.getItem('vl_course');
+      if (saved) app.course = app.courses.find(c => c.key === saved) || null;
+    }
+    if (app.course && !app.courses.some(c => c.key === app.course.key)) app.course = null;
+    renderCourses();
+    if (app.course) await loadVideos(app.course);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">加载失败</div>';
+    if (e.status === 401) { setPill('未登录', 'bad'); toast('先点右上角“登录教学网”'); }
+    else toast(e.message);
+  }
+}
+
+function renderCourses() {
+  const box = $('course-list');
+  box.textContent = '';
+  for (const c of app.courses) {
+    const b = document.createElement('button');
+    b.className = 'course' + (app.course && app.course.key === c.key ? ' active' : '');
+    const name = document.createElement('span');
+    name.textContent = c.name;
+    const term = document.createElement('span');
+    term.className = 'term';
+    term.textContent = c.term || '';
+    b.append(name, term);
+    b.onclick = () => {
+      app.course = c;
+      localStorage.setItem('vl_course', c.key);
+      renderCourses();
+      loadVideos(c);
+    };
+    box.append(b);
+  }
+}
+
+async function loadVideos(c) {
+  const box = $('video-list');
+  box.innerHTML = '<div class="empty">加载回放…</div>';
+  try {
+    const data = await api('/api/videos?course=' + encodeURIComponent(c.key));
+    app.videos = data.videos || [];
+    renderVideos();
+  } catch (e) {
+    box.innerHTML = '<div class="empty">加载失败</div>';
+    toast(e.message);
+  }
+}
+
+function findJobForVideo(v) {
+  for (const j of app.jobs.values()) {
+    if (v.lecture_key && j.lecture_key === v.lecture_key) return j;
+    if (j.params && j.params.title === v.title && j.params.time === v.time) return j;
+  }
+  return null;
+}
+
+function renderVideos() {
+  const box = $('video-list');
+  box.textContent = '';
+  if (!app.videos.length) { box.innerHTML = '<div class="empty">这门课没有回放</div>'; return; }
+  for (const v of app.videos) {
+    const row = document.createElement('div');
+    row.className = 'video';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.textContent = displayTitle(v.title);
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = [v.time, v.teacher].filter(Boolean).join(' · ');
+    meta.append(title, sub);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const job = findJobForVideo(v);
+    if (v.shared) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = `已有 · ${v.shared.uploader} · ${(v.shared.created_at || '').slice(5, 10)}`;
+      sub.append(' ', badge);
+    }
+    const run = document.createElement('button');
+    run.textContent = job ? '重新分析' : '分析回放';
+    if (!job) run.className = 'primary';
+    run.onclick = () => startJob(v, run);
+    actions.append(run);
+    if (v.shared) {
+      const use = document.createElement('button');
+      use.textContent = '用共享';
+      use.onclick = () => startSharedJob(v);
+      actions.prepend(use);
+    }
+    if (job) {
+      const view = document.createElement('button');
+      view.className = 'primary';
+      view.textContent = '查看过程';
+      view.onclick = () => openJob(job.course_key || app.course.key, job.id);
+      actions.prepend(view);
+    }
+    row.append(meta, actions);
+    box.append(row);
+  }
+}
+
+async function startJob(v, btn) {
+  btn.disabled = true;
+  try {
+    const body = {
+      play_url: v.play_url,
+      title: v.title,
+      time: v.time,
+      course_name: app.course ? app.course.name : '课程',
+      course_key: app.course ? app.course.key : '',
+      lecture_key: v.lecture_key || '',
+      eyes: $('opt-eyes').checked,
+      stream: $('opt-stream').checked,
+      limit_seconds: $('opt-sample').checked ? SAMPLE_SECONDS : null,
+    };
+    const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
+    app.jobs.set(data.job.id, data.job);
+    renderVideos();
+    showQueueBanner(data.job);
+    toast('已加入任务流', true);
+  } catch (e) {
+    toast(e.message);
+    btn.disabled = false;
+  }
+}
+
+function showQueueBanner(job) {
+  const banner = $('queue-banner');
+  $('queue-title').textContent = displayTitle(job.params && job.params.title);
+  banner.dataset.jobId = job.id;
+  banner.dataset.courseKey = job.course_key || (app.course ? app.course.key : '');
+  banner.hidden = false;
+}
+
+async function startSharedJob(v) {
+  if (!v.shared) return;
+  try {
+    const data = await api('/api/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        play_url: v.play_url,
+        title: v.title,
+        time: v.time,
+        course_name: app.course ? app.course.name : '课程',
+        course_key: app.course ? app.course.key : '',
+        lecture_key: v.lecture_key || '',
+        from_shared: true,
+        eyes: false,
+        stream: false,
+        limit_seconds: null,
+      }),
+    });
+    app.jobs.set(data.job.id, data.job);
+    toast('正在复制共享结果…', true);
+    openJob(data.job.course_key || (app.course && app.course.key), data.job.id);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+// ---------------------------------------------------------------- 路由
+function parseHash() {
+  let h = location.hash.replace(/^#/, '');
+  h = decodeURIComponent(h);
+  const m = h.match(/^\/c\/([^/]+)(?:\/([0-9A-Za-z]+))?$/);
+  if (m) return { courseKey: m[1], jobId: m[2] || null };
+  return { courseKey: null, jobId: null };
+}
+
+function openJob(courseKey, jobId) {
+  location.hash = '#/c/' + encodeURIComponent(courseKey) + '/' + jobId;
+}
+
+async function route() {
+  const r = parseHash();
+  stopPolls();
+  if (!r.courseKey) { showHome(); return; }
+  await showTask(r.courseKey, r.jobId);
+}
+
+function showHome() {
+  $('view-task').hidden = true;
+  $('view-home').hidden = false;
+  if (app.course) renderVideos();
+  updateQueueBanner();
+}
+
+function updateQueueBanner() {
+  let active = null;
+  for (const j of app.jobs.values()) {
+    if (j.state === 'running' || j.state === 'queued') { active = j; break; }
+  }
+  if (active && app.course && (active.course_key === app.course.key || !active.course_key)) {
+    showQueueBanner(active);
+  } else if (!active) {
+    $('queue-banner').hidden = true;
+  }
+}
+
+// ---------------------------------------------------------------- 任务页
+async function showTask(courseKey, jobId) {
+  await ensureJobs();
+
+  if (!jobId) {
+    const forCourse = [...app.jobs.values()]
+      .filter(j => j.course_key === courseKey)
+      .sort((a, b) => (b.created || 0) - (a.created || 0));
+    if (forCourse.length) {
+      jobId = forCourse[0].id;
+      history.replaceState(null, '', '#/c/' + encodeURIComponent(courseKey) + '/' + jobId);
+    }
+  }
+
+  let job = jobId ? app.jobs.get(jobId) : null;
+  if (jobId && !job) {
+    job = await api('/api/jobs/' + jobId).catch(() => null);
+    if (job) app.jobs.set(job.id, job);
+  }
+
+  app.courseKey = courseKey;
+  app.jobId = jobId || null;
+  app.stage = '';
+  app.chunks = null;
+
+  $('view-home').hidden = true;
+  $('view-task').hidden = false;
+
+  const course = app.courses.find(c => c.key === courseKey) || app.course;
+  const courseName = (course && course.key === courseKey) ? course.name
+    : (job && job.params && job.params.course_name) || courseKey;
+  if (!app.course || app.course.key !== courseKey) {
+    app.course = { key: courseKey, name: courseName, term: '' };
+  }
+  localStorage.setItem('vl_course', courseKey);
+  $('task-title').textContent = job ? displayTitle(job.params.title) : '任务';
+  $('task-sub').textContent = courseName;
+  if (job) statePill($('task-state'), job.state); else statePill($('task-state'), '');
+
+  renderTaskList(courseKey);
+  $('task-progress').textContent = '';
+  $('final-preview').hidden = true;
+  $('final-preview').textContent = '';
+  $('eyes-hint').textContent = '';
+  $('eyes-body').textContent = '';
+  app.eyesFrames = -1;
+
+  if (!job) {
+    $('task-title').textContent = '还没有任务';
+    $('live-draft').textContent = '这门课还没有任务，回课程页点“分析回放”。';
+    $('live-partial').textContent = '';
+    $('final-cards').textContent = '';
+    $('job-log').textContent = '';
+    return;
+  }
+
+  renderJobStatic(job);
+  startPolls(job);
+}
+
+function renderTaskList(courseKey) {
+  const box = $('task-list');
+  box.textContent = '';
+  const jobs = [...app.jobs.values()]
+    .filter(j => j.course_key === courseKey)
+    .sort((a, b) => (b.created || 0) - (a.created || 0));
+  if (!jobs.length) { box.innerHTML = '<div class="empty">还没有任务</div>'; return; }
+  for (const j of jobs) {
+    const b = document.createElement('button');
+    b.className = 'task-item' + (j.id === app.jobId ? ' active' : '');
+    const top = document.createElement('div');
+    top.className = 'ti-top';
+    const title = document.createElement('span');
+    title.className = 'ti-title';
+    title.textContent = displayTitle(j.params && j.params.title);
+    const pill = document.createElement('span');
+    pill.className = 'pill' + (j.state === 'done' ? ' ok' : j.state === 'failed' ? ' bad' : j.state === 'running' ? ' run' : '');
+    pill.textContent = STATE_TEXT[j.state] || j.state;
+    top.append(title, pill);
+    const sub = document.createElement('div');
+    sub.className = 'ti-sub';
+    const when = j.started ? new Date(j.started * 1000).toLocaleString() : '';
+    const dur = (j.started && j.finished) ? ' · ' + fmtDuration(j.finished - j.started) : '';
+    sub.textContent = (j.params && j.params.time ? j.params.time + ' · ' : '') + when + dur;
+    b.append(top, sub);
+    b.onclick = () => openJob(courseKey, j.id);
+    box.append(b);
+  }
+}
+
+function renderJobStatic(job) {
+  statePill($('task-state'), job.state);
+  const p = job.params || {};
+  const bits = [];
+  if (p.time) bits.push(p.time);
+  bits.push(p.eyes ? '眼睛' : '无眼睛');
+  bits.push(p.stream ? '流式' : '批量');
+  if (p.limit_seconds) bits.push('小样 ' + p.limit_seconds + 's');
+  const sh = job.share || {};
+  if (sh.state === 'done') bits.push('已自动上传');
+  else if (sh.state === 'uploading') bits.push('自动上传中…');
+  else if (sh.state === 'failed') bits.push('自动上传失败');
+  $('task-sub').textContent = (p.course_name ? p.course_name + ' · ' : '') + bits.join(' · ');
+  if (sh.state === 'uploading' && (job._shareRefreshes || 0) < 8) {
+    job._shareRefreshes = (job._shareRefreshes || 0) + 1;
+    setTimeout(() => refreshJobOnce(job.id), 5000);
+  }
+  renderFinals(job);
+  syncEyesCard(job);
+}
+
+async function refreshJobOnce(jobId) {
+  try {
+    const job = await api('/api/jobs/' + jobId);
+    app.jobs.set(job.id, job);
+    if (app.jobId === job.id) renderJobStatic(job);
+  } catch (e) { /* 后台刷新失败就算了 */ }
+}
+
+function syncEyesCard(job) {
+  const on = !!(job.params && job.params.eyes);
+  $('eyes-card').hidden = !on;
+  if (!on) {
+    $('eyes-body').textContent = '';
+    $('eyes-hint').textContent = '';
+    app.eyesFrames = -1;
+    return;
+  }
+  if (!$('eyes-hint').textContent) {
+    $('eyes-hint').textContent = '已开启，等待进入眼睛阶段…';
+  }
+}
+
+function updateEyes(data) {
+  const eyes = data.eyes || {};
+  if (!eyes.enabled) { $('eyes-card').hidden = true; return; }
+  $('eyes-card').hidden = false;
+  const frames = data.frames || [];
+  const bits = [];
+  if (eyes.status) bits.push('状态：' + eyes.status);
+  else if (data.state === 'running') bits.push('进行中');
+  bits.push(frames.length + ' 张截图');
+  if (eyes.vision_model) bits.push(eyes.vision_model);
+  $('eyes-hint').textContent = bits.join(' · ');
+
+  if (frames.length === app.eyesFrames) return;
+  app.eyesFrames = frames.length;
+  const body = $('eyes-body');
+  body.textContent = '';
+  for (const f of frames) {
+    const a = document.createElement('a');
+    a.href = f.url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    const img = document.createElement('img');
+    img.src = f.url;
+    img.loading = 'lazy';
+    img.alt = f.name;
+    a.append(img);
+    body.append(a);
+  }
+}
+
+// ---------------------------------------------------------------- 轮询
+function stopPolls() {
+  if (app.pollToken) app.pollToken.active = false;
+  if (app.liveToken) app.liveToken.active = false;
+  app.pollToken = null;
+  app.liveToken = null;
+}
+
+function startPolls(job) {
+  app.cursor = 0;
+  $('job-log').textContent = '';
+  pollLog(job);
+  pollLive(job);
+}
+
+async function pollLog(job) {
+  const token = { active: true };
+  app.pollToken = token;
+  while (token.active && app.jobId === job.id) {
+    let data;
+    try {
+      data = await api(`/api/jobs/${job.id}/log?after=${app.cursor}&wait=20`);
+    } catch (e) {
+      if (!token.active || app.jobId !== job.id) return;
+      if (e.status === 404) return;
+      await sleep(1500);
+      continue;
+    }
+    if (!token.active || app.jobId !== job.id) return;
+    appendLines(data.lines || []);
+    app.cursor = data.cursor;
+    statePill($('task-state'), data.state);
+    if (data.state !== 'running') {
+      await finishJob(job.id);
+      return;
+    }
+  }
+}
+
+async function pollLive(job) {
+  const token = { active: true };
+  app.liveToken = token;
+  while (token.active && app.jobId === job.id) {
+    let data;
+    try {
+      data = await api(`/api/jobs/${job.id}/live`);
+    } catch (e) {
+      await sleep(1500);
+      continue;
+    }
+    if (!token.active || app.jobId !== job.id) return;
+    updateLive(data);
+    if (data.state === 'done' || data.state === 'failed') return;
+    await sleep(1500);
+  }
+}
+
+function setLiveText(id, text, placeholder) {
+  const el = $(id);
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  const value = (text || '').trim();
+  if (!value) {
+    el.textContent = placeholder;
+    el.classList.add('empty-text');
+    return;
+  }
+  el.textContent = value;
+  el.classList.remove('empty-text');
+  if (nearBottom) el.scrollTop = el.scrollHeight;
+}
+
+function updateLive(data) {
+  const byKey = {};
+  for (const f of (data.files || [])) byKey[f.key] = f;
+  const draft = byKey.draft || byKey.draft_final;
+  setLiveText('live-draft', draft && draft.text, '还没有初稿（转写第一块完成后开始写）');
+  setLiveText('live-partial', byKey.partial && byKey.partial.text, '还没有文字稿');
+  const hints = [];
+  if (draft) hints.push('初稿 ' + fmtSize(draft.bytes));
+  if (byKey.partial) hints.push('文字稿 ' + fmtSize(byKey.partial.bytes));
+  $('live-hint').textContent = hints.join(' · ') + (draft && draft.truncated ? '（已截断显示）' : '');
+  updateEyes(data);
+}
+
+async function finishJob(jobId) {
+  const job = await api('/api/jobs/' + jobId).catch(() => null);
+  if (!job) return;
+  app.jobs.set(job.id, job);
+  renderTaskList(app.courseKey);
+  renderJobStatic(job);
+  const live = await api('/api/jobs/' + jobId + '/live').catch(() => null);
+  if (live) updateLive(live);
+  if (job.state === 'done') toast('完成：' + displayTitle(job.params.title), true);
+  else if (job.state === 'failed') toast('任务失败：' + (job.error || ''));
+}
+
+function classify(line) {
+  if (/\[错误\]|Traceback|Error:|失败/.test(line)) return 'err';
+  if (line.startsWith('[asr]')) return 'asr';
+  if (line.startsWith('[llm]') || line.startsWith('[stream]')) return 'llm';
+  if (line.startsWith('[ctx]')) return 'warn';
+  if (/^\s*\[\d+\/\d+\]/.test(line)) return 'dim';
+  return '';
+}
+
+function appendLines(lines) {
+  const box = $('job-log');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  for (const line of lines) {
+    const span = document.createElement('span');
+    const cls = classify(line);
+    span.className = 'l' + (cls ? ' ' + cls : '');
+    span.textContent = line;
+    box.append(span);
+
+    const stage = line.match(/^\s*\[(\d+)\/(\d+)\]\s*(.+?)\s*$/);
+    if (stage) { app.stage = stage[3] + '（' + stage[1] + '/' + stage[2] + '）'; }
+    const chunk = line.match(/初稿\s+(\d+)\/(\d+)\s*块/);
+    if (chunk) { app.chunks = [Number(chunk[1]), Number(chunk[2])]; }
+  }
+  if (nearBottom) box.scrollTop = box.scrollHeight;
+  updateProgress();
+}
+
+function updateProgress() {
+  const parts = [];
+  if (app.stage) parts.push(app.stage);
+  if (app.chunks) parts.push('初稿 ' + app.chunks[0] + '/' + app.chunks[1] + ' 块');
+  $('task-progress').textContent = parts.join(' · ');
+}
+
+// ---------------------------------------------------------------- 最终结果
+const FINAL_DEFS = [
+  ['retell.md', '最终重述', 'A 精讲 + B 重讲，含板书截图'],
+  ['notes_map.md', '分段笔记', '按知识点整理的精读笔记'],
+  ['transcript.md', '完整文字稿', '带时间戳的转写'],
+];
+
+function renderFinals(job) {
+  const box = $('final-cards');
+  box.textContent = '';
+  const arts = job.artifacts || [];
+  const byName = {};
+  for (const a of arts) byName[a.name] = a;
+  for (const [name, label, desc] of FINAL_DEFS) {
+    const a = byName[name];
+    const card = document.createElement('div');
+    card.className = 'final-card' + (a ? '' : ' missing');
+    const title = document.createElement('div');
+    title.className = 'fc-title';
+    title.textContent = label;
+    const d = document.createElement('div');
+    d.className = 'fc-desc';
+    d.textContent = a ? desc + ' · ' + fmtSize(a.bytes) : (job.state === 'running' ? '生成中…' : '未生成');
+    const actions = document.createElement('div');
+    actions.className = 'fc-actions';
+    if (a) {
+      const view = document.createElement('button');
+      view.textContent = '预览';
+      view.onclick = () => previewArtifact(a);
+      const dl = document.createElement('a');
+      dl.className = 'art';
+      dl.href = a.url;
+      dl.target = '_blank';
+      dl.rel = 'noopener';
+      dl.textContent = '下载';
+      actions.append(view, dl);
+    }
+    card.append(title, d, actions);
+    box.append(card);
+  }
+
+  const others = $('other-artifacts');
+  others.textContent = '';
+  const skip = new Set(['retell.md', 'notes_map.md', 'transcript.md']);
+  const rest = arts.filter(a => !skip.has(a.name) && !a.name.startsWith('frames/'));
+  const frames = arts.filter(a => a.name.startsWith('frames/'));
+  for (const a of rest) {
+    const link = document.createElement('a');
+    link.className = 'art';
+    link.href = a.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = a.name.replace('frames/', '') + ' ' + fmtSize(a.bytes);
+    if (/\.(md|txt|srt|json|log)$/.test(a.name)) {
+      link.onclick = (ev) => { ev.preventDefault(); previewArtifact(a); };
+    }
+    others.append(link);
+  }
+  if (frames.length) {
+    const note = document.createElement('span');
+    note.className = 'hint';
+    note.textContent = '截图 ' + frames.length + ' 张（在上面产物里可单独打开）';
+    others.append(note);
+  }
+  $('final-hint').textContent = arts.length ? '' : (job.state === 'running' ? '流式阶段结束、final pass 完成后出现' : '');
+  if (job.state === 'done' && byName['retell.md'] && app.previewedJob !== job.id) {
+    app.previewedJob = job.id;
+    previewArtifact(byName['retell.md']);
+  }
+}
+
+const IMG_MD = /!\[([^\]]*)\]\((frames\/[^)\s]+)\)/g;
+
+function renderPreview(el, text) {
+  el.textContent = '';
+  let last = 0;
+  let m;
+  IMG_MD.lastIndex = 0;
+  while ((m = IMG_MD.exec(text)) !== null) {
+    if (m.index > last) {
+      const pre = document.createElement('span');
+      pre.textContent = text.slice(last, m.index);
+      el.append(pre);
+    }
+    const img = document.createElement('img');
+    img.src = '/api/jobs/' + app.jobId + '/file?name=' + encodeURIComponent(m[2]);
+    img.alt = m[1];
+    img.loading = 'lazy';
+    const cap = document.createElement('span');
+    cap.className = 'cap';
+    cap.textContent = m[1];
+    el.append(img, cap);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) {
+    const rest = document.createElement('span');
+    rest.textContent = text.slice(last);
+    el.append(rest);
+  }
+}
+
+async function previewArtifact(a) {
+  try {
+    const res = await fetch(a.url, { headers: { 'X-VL-Key': KEY } });
+    if (!res.ok) throw new Error('读取失败');
+    const text = await res.text();
+    const el = $('final-preview');
+    const clipped = text.length > 200000 ? text.slice(0, 200000) + '\n\n…（已截断）' : text;
+    renderPreview(el, clipped);
+    el.hidden = false;
+    el.scrollIntoView({ block: 'nearest' });
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+// ---------------------------------------------------------------- 事件
+$('btn-login').onclick = async () => {
+  const s = await refreshStatus();
+  if (s && !s.has_password) { $('settings-dialog').showModal(); return; }
+  $('btn-login').disabled = true;
+  $('btn-login').textContent = '登录中…';
+  try {
+    await api('/api/login', { method: 'POST', body: '{}' });
+    toast('登录成功', true);
+    await loadCourses();
+  } catch (e) {
+    toast('登录失败：' + e.message);
+  } finally {
+    $('btn-login').disabled = false;
+    $('btn-login').textContent = '登录教学网';
+  }
+};
+
+$('btn-settings').onclick = async () => {
+  const s = await refreshStatus(false);
+  const f = $('settings-form');
+  if (s) {
+    f.student_id.value = '';
+    f.student_id.placeholder = s.student_id ? ('当前 ' + s.student_id + '（留空不改）') : '学号';
+    f.api_key.placeholder = s.api_key ? ('已保存 ' + s.api_key + '（留空不改）') : 'sk-...';
+    f.llm_model.value = s.llm_model || '';
+    f.whisper_model.value = '';
+    if (s.share) {
+      f.share_server.value = s.share.server || '';
+      f.share_name.value = s.share.name || '';
+      $('share-hint').textContent = s.share.enabled
+        ? `已连接：${s.share.server}（${s.share.name}）`
+        : '注册后，列表里会标出别人已经分析过的回放；你完成的分析会自动上传（小样除外）。';
+    }
+  }
+  $('settings-dialog').showModal();
+};
+
+$('settings-form').addEventListener('submit', async (ev) => {
+  const submitter = ev.submitter;
+  if (!submitter || submitter.value !== 'save') return;
+  ev.preventDefault();
+  const f = $('settings-form');
+  const body = {
+    student_id: f.student_id.value.trim(),
+    password: f.password.value,
+    api_key: f.api_key.value.trim(),
+    llm_model: f.llm_model.value.trim(),
+  };
+  if (f.whisper_model.value) body.whisper_model = f.whisper_model.value;
+  for (const k of Object.keys(body)) if (body[k] === '') delete body[k];
+  if (!Object.keys(body).length) { $('settings-dialog').close(); return; }
+  $('settings-save').disabled = true;
+  try {
+    await api('/api/settings', { method: 'POST', body: JSON.stringify(body) });
+    toast('已保存到 .env', true);
+    $('settings-dialog').close();
+    f.password.value = '';
+    f.api_key.value = '';
+    await refreshStatus(false);
+    if (app.authenticated) await loadCourses();
+  } catch (e) {
+    toast('保存失败：' + e.message);
+  } finally {
+    $('settings-save').disabled = false;
+  }
+});
+
+$('btn-back').onclick = () => { location.hash = '#/'; };
+$('btn-share-register').onclick = async () => {
+  const f = $('settings-form');
+  const body = {
+    server: f.share_server.value.trim(),
+    invite: f.share_invite.value.trim(),
+    name: f.share_name.value.trim() || '同学',
+  };
+  if (!body.server) { toast('请填共享服务地址'); return; }
+  if (!body.invite) { toast('请填邀请码'); return; }
+  const btn = $('btn-share-register');
+  btn.disabled = true;
+  btn.textContent = '注册中…';
+  try {
+    const data = await api('/api/share/register', { method: 'POST', body: JSON.stringify(body) });
+    app.share = data.share || {};
+    f.share_invite.value = '';
+    $('share-hint').textContent = `已连接：${app.share.server}（${app.share.name}）`;
+    toast('共享已连接', true);
+    if (app.course) await loadVideos(app.course);
+  } catch (e) {
+    toast('注册失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '注册 / 更新共享';
+  }
+};
+$('queue-open').onclick = () => {
+  const banner = $('queue-banner');
+  if (banner.dataset.jobId) openJob(banner.dataset.courseKey, banner.dataset.jobId);
+};
+$('opt-sample').onchange = () => {
+  if ($('opt-sample').checked) toast(`只转写前 ${SAMPLE_SECONDS} 秒，用于快速验证效果`);
+};
+window.addEventListener('hashchange', route);
+
+// ---------------------------------------------------------------- 启动
+(async () => {
+  const s = await refreshStatus(false);
+  await ensureJobs();
+  const checked = s && s.has_password ? await refreshStatus(true) : s;
+  if (checked && checked.authenticated) await loadCourses();
+  else if (s && !s.has_password) $('settings-dialog').showModal();
+  await route();
+})();
+</script>
+</body>
+</html>

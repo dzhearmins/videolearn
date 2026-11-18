@@ -25,7 +25,7 @@ import psutil
 import requests
 
 from .config import Settings, load_settings
-from .media import find_ffmpeg
+from .media import find_ffmpeg, find_ffprobe
 
 SYSTEM_RESTATE = (
     "你是课堂助教。把这段课堂转写改写成连贯、忠实的中文重述：保留定义、定理、公式（LaTeX）"
@@ -270,10 +270,12 @@ def run(args) -> int:
         raise SystemExit("需要 DEEPSEEK_API_KEY")
     model = args.llm_model or settings.llm_model
 
-    ffprobe = Path(ffmpeg).with_name("ffprobe.exe")
+    ffprobe = find_ffprobe(ffmpeg)
+    if not ffprobe:
+        raise SystemExit("需要 ffprobe（通常与 ffmpeg 一起安装）")
     dur = float(
         subprocess.run(
-            [str(ffprobe), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video)],
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video)],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
     )
@@ -551,6 +553,9 @@ def run(args) -> int:
 
 
 def main() -> int:
+    from .term import soften_console
+
+    soften_console()
     p = argparse.ArgumentParser(description="流式 ASR+LLM 重述基准")
     p.add_argument("--video", required=True)
     p.add_argument("--chunk-seconds", type=float, default=240)

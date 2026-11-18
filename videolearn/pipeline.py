@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -15,10 +16,24 @@ from . import asr, blackboard, llm, media, streaming, vision
 from .config import Settings
 from .session import BBClient
 
+MAX_NAME_CHARS = 80   # Windows：255 个 UTF-16 单元，80 字符足够安全
+MAX_NAME_BYTES = 160  # POSIX：文件名上限通常 255 字节，留出时间戳与后缀
+
+
+def _clip_utf8(text: str, limit: int) -> str:
+    """按 UTF-8 字节数截断，不切断多字节字符。"""
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return raw[:limit].decode("utf-8", "ignore").rstrip(" ._")
+
 
 def safe_name(name: str, fallback: str = "未命名") -> str:
-    name = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", name).strip(" ._")
-    return (name or fallback)[:80]
+    name = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", name).strip(" ._") or fallback
+    if os.name == "nt":
+        return name[:MAX_NAME_CHARS]
+    # ext4/APFS 的文件名是"字节"限制，中文一字 3 字节，按字符截会超长。
+    return _clip_utf8(name, MAX_NAME_BYTES) or fallback
 
 
 def token_hint(play_url: str) -> dict:
@@ -81,7 +96,12 @@ def run_for_video(
     chunk_seconds: float = 240.0,
     overlap_seconds: float = 5.0,
     asr_threads: int = 8,
+    on_out_dir=None,
 ) -> RunResult:
+    """执行完整流水线。
+
+    on_out_dir: 可选回调，输出目录一创建就调用（长任务要边跑边读产物时用）。
+    """
     pipeline_t0 = time.monotonic()
     stamp = time_text.strip().replace(":", "").replace(" ", "_") or datetime.now().strftime("%Y-%m-%d_%H%M")
     title = _display_title(title)
@@ -91,6 +111,8 @@ def run_for_video(
         suffix = ""
     out_dir = settings.output_dir / safe_name(course_name) / f"{safe_name(stamp)}_{safe_name(title, '回放')}{suffix}"
     out_dir.mkdir(parents=True, exist_ok=True)
+    if on_out_dir is not None:
+        on_out_dir(out_dir)
     llm.reset_trace()
 
     steps = 5 if eyes else 4

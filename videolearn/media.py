@@ -328,20 +328,42 @@ def download_direct_mp4(client: BBClient, url: str, dest: Path, on_progress=None
 
 # ---------------- ffmpeg ----------------
 def find_ffmpeg() -> str | None:
+    """定位 ffmpeg：优先 PATH，其次各平台常见安装位置。"""
     exe = shutil.which("ffmpeg")
     if exe:
         return exe
-    local = Path(os.environ.get("LOCALAPPDATA", ""))
     candidates: list[Path] = []
-    packages = local / "Microsoft" / "WinGet" / "Packages"
-    if packages.exists():
-        candidates += sorted(packages.glob("Gyan.FFmpeg*/ffmpeg-*/bin/ffmpeg.exe"))
-    candidates.append(local / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe")
-    candidates.append(Path(r"C:\ffmpeg\bin\ffmpeg.exe"))
+    if os.name == "nt":
+        local = Path(os.environ.get("LOCALAPPDATA", ""))
+        packages = local / "Microsoft" / "WinGet" / "Packages"
+        if packages.exists():
+            candidates += sorted(packages.glob("Gyan.FFmpeg*/ffmpeg-*/bin/ffmpeg.exe"))
+        candidates.append(local / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe")
+        candidates.append(Path(r"C:\ffmpeg\bin\ffmpeg.exe"))
+    else:
+        # macOS（Homebrew 两种前缀）与 Linux 常见位置；PATH 没有覆盖时兜底
+        candidates += [
+            Path("/opt/homebrew/bin/ffmpeg"),
+            Path("/usr/local/bin/ffmpeg"),
+            Path("/usr/bin/ffmpeg"),
+            Path("/snap/bin/ffmpeg"),
+        ]
     for c in candidates:
         if c.exists():
             return str(c)
     return None
+
+
+def find_ffprobe(ffmpeg: str | None = None) -> str | None:
+    """定位 ffprobe：先看 ffmpeg 同目录（Windows 带 .exe），再退回 PATH。"""
+    exe = ffmpeg or find_ffmpeg()
+    if exe:
+        name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+        sibling = Path(exe).with_name(name)
+        if sibling.exists():
+            return str(sibling)
+    return shutil.which("ffprobe")
+
 
 
 def _remux_ts_to_mp4(src: Path, dst: Path) -> bool:

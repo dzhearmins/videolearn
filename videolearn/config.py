@@ -23,6 +23,9 @@ class Settings:
     vision_model: str = ""
     whisper_model: str = "small"
     asr_prompt: str = ""
+    share_server: str = ""
+    share_token: str = ""
+    share_name: str = ""
     state_dir: Path = field(default=STATE_DIR)
     output_dir: Path = field(default=OUTPUT_DIR)
 
@@ -51,4 +54,7 @@ def load_settings() -> Settings:
         vision_model=os.getenv("VISION_MODEL", "").strip() or llm_model,
         whisper_model=os.getenv("VIDEOLRN_WHISPER_MODEL", "small").strip(),
         asr_prompt=os.getenv("VIDEOLRN_ASR_PROMPT", "").strip(),
+        share_server=os.getenv("SHARE_SERVER", "").strip().rstrip("/"),
+        share_token=os.getenv("SHARE_TOKEN", "").strip(),
+        share_name=os.getenv("SHARE_NAME", "").strip(),
     )

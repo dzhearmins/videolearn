@@ -1,8 +1,15 @@
 # 共享总结缓存：C 方案上的"唯一服务器"
 
-> 状态：可行性结论 + 设计草案。日期 2026-11-18。
+> 状态：**已实现并部署**（2026-11-18）。日期 2026-11-18。
 > 主文档：[centralized-service-architecture.md](centralized-service-architecture.md)（C 方案见 §5）
 > 本文回答：本地 Web UI（C）+ 一个"已总结过就直接复制"的中心服务器，能不能做。
+>
+> **线上地址**：<http://39.97.231.204/vl>
+> **部署位置**：`dzr@39.97.231.204:/home/dzr/videolearn-share`（systemd `videolearn-share`，监听 127.0.0.1:8787，nginx `/vl/` 反代）
+> **管理命令**：`ssh ... 'cd ~/videolearn-share && python3 -m share_server invite|devices|revoke <id>|stats'`
+>
+> 已知限制：入口是 HTTP（80 端口，云安全组只放开 80/3000/8888/22）。
+> 设备令牌在链路上是明文，公网使用前应换成域名 + TLS（或改用 443 并放行）。
 
 ---
 
@@ -13,10 +20,10 @@
 - 服务器只存**文字**（总结、转写、可选截图），不存视频/音频/Cookie/密码。
   最坏情况下的泄露 = 一批课堂笔记，不是一批北大账号。
 - **关键发现：判断"是不是同一节课"的稳定键，已经躺在播放链接的 JWT 里了**
-  （`hqyCourseId` + `hqySubId`）。客户端在选完课、**还没开始下载**时就能本地算出来，
-  不需要多一次请求，也不需要先下 1 GB 视频。§2 有解码实证。
+  （`hqyCourseId` + `hqySubId`）。本机实测确认这两个字段在真实链接里存在（§2.1），
+  客户端在选完课、**还没开始下载**时就能本地算出来，不需要多一次请求，也不需要先下 1 GB 视频。
 - 服务器只做两个动作：`查` 和 `存`。没有任务队列、没有 ASR、没有媒体代理。
-  代码量约 300 行，成本约等于一个静态站。
+  代码量约几百行，成本约等于一个静态站。
 - 真正的难点不在技术，在**冷启动**和**质量漂移**（§6、§7）：
   第一次必然 miss；共享来的总结可能是旧提示词/旧模型生成的。
 
@@ -48,7 +55,7 @@
 ### 2.1 实证：播放链接里有什么
 
 `playVideo.action?token=...` 的 JWT payload，现有代码 `pipeline.token_hint()` 已经在解码
-（只是目前只用了 `recordTime`）。现有测试里的样本（`tests/test_parse.py:73`，结构与真实链接一致）解码结果：
+（只是目前只用了 `recordTime`）。测试样本（`tests/test_parse.py:73`）解码结果：
 
 ```json
 {
@@ -60,12 +67,12 @@
 }
 ```
 
-本机账号实测（2026-11-18，课程 `_103960_1`，10 条回放）：
+本机账号实测（2026-11-18，课程 `_103960_1`，10 条回放，只读探针，未下载）：
 
 ```
-hqyCourseId = 198750        （10 条全部相同）
-hqySubId    = 4489574 / 4489570 / 4489566 / 4489562 …（每条不同）
-kcwybm      = 26271-00048-04830010-1106180264-00-1             （10 条全部相同）
+hqyCourseId = 198750                                        （10 条全部相同）
+hqySubId    = 4489574 / 4489570 / 4489566 / 4489562 …       （每条不同）
+kcwybm      = 26271-00048-04830010-110****264-00-1          （10 条全部相同，学号已打码）
 recordTime  = 与列表里的时间列完全一致
 ```
 
@@ -77,7 +84,7 @@ recordTime  = 与列表里的时间列完全一致
 ### 2.2 推荐键：`hqyCourseId` + `hqySubId`
 
 ```
-lecture_key = f"{hqyCourseId}:{hqySubId}"     # 例：199138:4496206
+lecture_key = f"{hqyCourseId}:{hqySubId}"     # 例：198750:4489574
 ```
 
 | 候选键 | 来源 | 稳定性 | 需要额外请求 | 评价 |
@@ -89,9 +96,9 @@ lecture_key = f"{hqyCourseId}:{hqySubId}"     # 例：199138:4496206
 
 #### 两个必须警惕的点
 
-1. **`kcwybm` 可能嵌了学号。** 本机这个值是 `26271-00048-04830010-1106180264-00-1`，
+1. **`kcwybm` 可能嵌了学号。** 本机这个值是 `26271-00048-04830010-110****264-00-1`，
    而测试里课程名被掩码成 `110****264` —— 说明这个字段对部分课程是**按学生生成**的。
-   所以 `kcwybm` 不能当共享键，只能做展示和交叉校验。
+   所以 `kcwybm` 不能当共享键，只能做展示和交叉校验；**也不要把 `kcwybm` 上传到服务器**。
 2. **按学生单独开课的课程可能无法共享。** 如果学校给每个人单独建课，
    两个同学的 `hqyCourseId` 会不同，`hqySubId` 更不会相同，缓存直接失效。
    这不是实现问题，是数据模型决定的，只能在 Phase 0 用两个账号分别验证
@@ -127,9 +134,8 @@ lecture_key = f"{hqyCourseId}:{hqySubId}"     # 例：199138:4496206
 **明确不分享（也不许服务器接触）**：视频、音频、Cookie、`play_url`（含短期 JWT）、
 任何与 PKU 账号相关的东西。
 
-**截图**（`frames/*.jpg`）：默认**一起分享**，因为数学课的重述离开板书图会掉一半价值；
-体积每节 1–3 MB，可关。它确实是课堂画面的静帧，属于版权灰色地带（§9），
-所以在 UI 上要让分享者显式勾选。
+**截图**（`frames/*.jpg`）：随包自动上传（最多 24 张），因为数学课的重述离开板书图会掉一半价值。
+它确实是课堂画面的静帧，属于版权灰色地带（§9），所以只在"同班共享"范围内流转。
 
 ---
 
@@ -150,15 +156,18 @@ lecture_key = f"{hqyCourseId}:{hqySubId}"     # 例：199138:4496206
                      │                 → 打开结果页（10 秒内完成）
                      │
                      └─ 无共享 → 正常跑（下载→ASR→LLM→眼睛→final_pass）
-                               └ 结束后：分享开关（默认按用户设置）→ PUT bundle
+                               └ 总结完整 → 后台自动上传（无需点击）
 ```
 
 关键点：
-- **查在下载之前**，否则省不下 1 GB 和 1 小时。
+- **查在下载之前**，否则省不下 1 GB 和半小时 ASR。
 - **批量查**：列表页有 16 行，逐行 GET 会让页面卡顿；一个 `lookup` 请求返回全部。
 - **落地即原生**：解包后的目录结构与本地跑出来的一模一样
   （`video.mp4` 不存在、其余同名），这样预览、导出、二次处理都无需特判。
 - **来源标记**：`meta.json` 增加字段，UI 上显示徽标，避免用户误以为是自己跑的。
+- **自动上传**：任务 `done` 且 `retell.md` 存在就上传，不需要用户点任何按钮；
+  上传在后台线程里做，失败只写日志，不影响本地结果。
+  两类例外不传：**小样**（`--limit-seconds`，会污染整节课）和**复制来的共享结果**。
 
 ```jsonc
 // 复制来的 meta.json 追加
@@ -178,56 +187,51 @@ lecture_key = f"{hqyCourseId}:{hqySubId}"     # 例：199138:4496206
 
 ## 5. 服务端（极小）
 
-### 5.1 组件
+### 5.1 组件（已实现）
 
 ```
-浏览器(本地 Web UI) ──HTTPS──> 共享服务
-                                ├ FastAPI（300 行）
-                                ├ SQLite（元数据）
-                                ├ 本地磁盘/S3（zip 包）
-                                └ 邀请码 + 站点账号
+浏览器(本地 Web UI) ──HTTP 127.0.0.1:876x──> 本地 Python ──HTTP──> nginx /vl/ ──> 127.0.0.1:8787
+                                                                  共享服务（stdlib + SQLite + 磁盘）
 ```
 
-没有 worker、没有队列、没有媒体、没有 PKU 依赖。它就是"索引 + 对象存储"。
+单文件 `share_server/server.py`，标准库 `http.server`，没有 Web 框架、没有 worker、没有队列。
+服务以 `dzr` 用户跑在 systemd 里（`Restart=always`），数据在 `~/videolearn-share/data`。
 
-### 5.2 数据模型
+### 5.2 数据模型（已实现）
 
 ```sql
-users(id, email, pwd_hash, created_at)
-devices(id, user_id, token_hash, name, last_seen)
-courses(id, hqy_course_id UNIQUE, name, term)          -- 首次上传/查询时自建
-memberships(user_id, course_id, role)                  -- 谁能读这门课
-summaries(
-  id, course_id, hqy_sub_id, uploader_id, created_at,
-  pipeline_version, prompt_hash, asr_model, llm_model,
-  record_time, duration_sec, transcript_sha256,
-  bytes, has_frames, hidden, report_count,
-  UNIQUE(course_id, hqy_sub_id, transcript_sha256)
-)
+devices(id, token_hash, name, created_at, last_seen, revoked)
+invites(code, created_at, used_by, used_at)          -- 一次性邀请码
+summaries(id, lecture_key, uploader_id, created_at, course_name, title, record_time,
+          pipeline_version, prompt_hash, asr_model, llm_model, duration_sec,
+          transcript_sha256, has_frames, bytes, bundle_path, hidden, report_count,
+          UNIQUE(lecture_key, transcript_sha256))
+reports(summary_id, device_id, ...)                  -- 去重举报，≥2 隐藏
 ```
 
-### 5.3 API
+**没有 users / email / 密码**：邀请码换设备令牌就够了，也少一个被撞库的面。
+
+### 5.3 API（已实现）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/auth/register` | 邀请码 + 邮箱 + 口令（argon2id） |
-| POST | `/api/auth/login` | 会话 Cookie（HttpOnly） |
-| POST | `/api/devices/pair` | 本地 UI 用 6 位码换设备令牌（避免每次登录） |
-| POST | `/api/summaries/lookup` | `{keys:[...]}` → `{key: meta}`，批量 |
-| GET | `/api/summaries/{key}/bundle` | 下载 zip（签名短链，5 分钟有效） |
-| PUT | `/api/summaries/{key}` | 上传 zip（≤ 6 MB），幂等 |
-| POST | `/api/summaries/{key}/report` | 标记有问题 |
-| DELETE | `/api/summaries/{key}` | 上传者/管理员 |
+| GET | `/health` | 公开，返回条目数/字节数 |
+| POST | `/api/register` | `{name, invite}` → `{token}`（邀请码只能用一次） |
+| POST | `/api/lookup` | `{keys:[...]}` → `{items:{key:meta}}`，批量 |
+| GET | `/api/summaries/{key}/bundle` | 下载 zip（按需取最新一版） |
+| POST | `/api/summaries/{key}` | `{meta, bundle_b64}`，同一节课覆盖旧版 |
+| POST | `/api/summaries/{key}/report` | 两人举报后隐藏 |
+| DELETE | `/api/summaries/{key}/{id}` | 仅上传者 |
 
-鉴权：浏览器 Cookie；本地 UI 每次启动用设备令牌，不落盘明文（存 DPAPI/钥匙串）。
+鉴权统一是 `Authorization: Bearer <device token>`；令牌只写在本机 `.env`（已 gitignore）。
 
-### 5.4 版本与冲突
+### 5.4 版本与冲突（最新覆盖）
 
-- 同一个 `(course, hqySubId)` 允许多份，**按 `transcript_sha256` 去重**。
-- 默认选择策略：优先 `pipeline_version == 当前` 且 `asr_model` 不低；否则取最新。
-- 列表页只显示徽标，不显示版本细节；点开后可以"查看其它版本"。
-- 上传采用"先写临时对象再提交元数据"，避免半包。
-- 响应带 `sha256`/`ETag`，客户端落地后校验；不一致就重下或回退到重跑。
+- **一节课一条**：`lecture_key` 唯一；再次上传直接覆盖，旧 zip 删除，`updated_at` 刷新。
+- 目的：换更强 LLM / 提示词后重跑，新结果自动顶掉旧结果，同学下次拿到的就是新版。
+- 列表里只显示这一条（带 `updated_at`），不保留历史版本。
+- 覆盖时清空旧举报（新内容重新计票）。
+- 上传采用"先写临时文件、提交元数据后再改名"，避免半包。
 
 ### 5.5 存储与成本
 
@@ -270,6 +274,8 @@ summaries(
 
 - 课程换学期 → 新 `hqyCourseId` → 旧缓存自然不命中，不会串到新学期。
 - 录像被学校重新上传 → 新 `hqySubId` → miss，需要重跑。这是正确行为，不是 bug。
+- **按学生单独开课的课程**（§2.2 第 2 点）可能两边 key 根本不同，这类课共享不到，
+  但也不会串数据——只是回到"自己跑"。UI 上显示"本课暂无共享"即可。
 
 ---
 
@@ -293,11 +299,11 @@ summaries(
 
 ### 7.4 零代码基线（先想清楚要不要写代码）
 
-一个共享文件夹（OneDrive/坚果云/群文件），目录名 `199138_4496206/`，
+一个共享文件夹（OneDrive/坚果云/群文件），目录名 `198750_4489574/`，
 里面放 `retell.md` + `transcript.md`，就是同一个东西，**1 小时能上线**。
 它不能自动查、不能显示徽标、不能去重，但对 5–10 人的小圈子足够。
 
-**只有当"自动查 + 列表打标"确实被需要时，才值得写那个 300 行的服务。**
+**只有当"自动查 + 列表打标"确实被需要时，才值得写那个几百行的服务。**
 
 ---
 
@@ -306,23 +312,23 @@ summaries(
 | # | 坑 | 防护 |
 |---|---|---|
 | 1 | **采样片段入库**：`--start-seconds 600 --limit-seconds 90` 跑出来的残稿被当成全课 | 上传前断言 `start_seconds in (None, 0) and limit_seconds is None`；查询时同样跳过 |
-| 2 | `--no-stream` / `--no-eyes` 变体质量不同 | 记入 meta；选择策略里降权 |
+| 2 | `--no-stream` / `--no-eyes` 变体质量不同 | 记入 meta 并在徽标里显示 `asr_model`；一课一条，不需要选择策略 |
 | 3 | token 缺失/结构变化 | 回退 302 参数；再失败静默跳过，不影响主流程 |
-| 4 | 服务器挂了 | 只提示"无法查询共享"，本地流程照常；**绝不能阻塞** |
+| 4 | 服务器挂了 | 只提示"无法查询共享"，本地流程照常；自动上传失败只记日志，**绝不能阻塞** |
 | 5 | 图片相对路径断裂 | bundle 保留 `frames/` 相对路径；解包时校验 |
 | 6 | 同名不同班串数据 | 键里必须含 `hqyCourseId`，不用课程名 |
-| 7 | 重复上传 | `(course, sub, transcript_sha256)` 唯一键 + 幂等 PUT |
+| 7 | 同课重复上传 | `lecture_key` 唯一，**覆盖旧版并删除旧 zip**，`updated_at` 刷新 |
 | 8 | XSS：`retell.md` 含 HTML/图片 | 渲染前 sanitize；CSP；只允许白名单标签 |
 | 9 | 时区/格式 | 统一存 ISO8601 + `Asia/Shanghai`，展示时本地化 |
-| 10 | 分享泄露隐私 | 只传产物，不传路径/用户名/学号；昵称可改 |
+| 10 | 自动上传泄露隐私 | 只传产物，不传路径/用户名/学号；昵称可改；不配共享就不上传 |
 
 ---
 
 ## 9. 合规边界
 
 - **只存文字**（可选静帧），不存音视频，不提供视频下载。
-- 访问范围限定"同班"（`memberships` + 课程邀请码），不做公开索引、不做搜索引擎可见。
-- 分享是**显式勾选**，可随时删除自己的上传；讲师/管理员要求下架时能一键隐藏。
+- 访问范围是"拿到邀请码的同学"（邀请码注册设备令牌），不做公开注册、不做搜索引擎可见。
+- 注册后**自动上传**（无需点击）；任意用户可删除自己的上传，管理员可一键隐藏。
 - 课堂内容仍是教师的表达，AI 重述是衍生作品。同班共享笔记是常见学习行为，
   但**不要**做成公开站点，也不要二次分发到班外。
 - 版权提示保留在产物页；不把截图标成"原创"。
@@ -331,23 +337,26 @@ summaries(
 
 ## 10. 工程量与验收
 
-| 任务 | 估时 |
+| 任务 | 状态 |
 |---|---|
-| 服务端（FastAPI + SQLite + 存储 + 邀请码） | 2–3 天 |
-| 客户端 `share.py`（key 解析 / lookup / bundle 落地 / publish） | 2 天 |
-| 本地 Web UI 的"已有"徽标 + 选择弹窗 + 分享开关 | 1–2 天 |
-| 导入现有 `output/` 做种子 + 联调 | 1 天 |
+| 服务端（stdlib http.server + SQLite + 磁盘 + 邀请码） | 已完成，部署在 39.97.231.204 |
+| 客户端 `share.py`（key 解析 / lookup / bundle 落地 / 自动上传） | 已完成 |
+| 本地 Web UI："已有"徽标 / 用共享 / 共享设置 / 上传状态 | 已完成 |
+| 自动上传（完成即传、失败不阻塞、小样与共享副本跳过） | 已完成 |
 
 **Phase 0 必须先验证的一件事**（半天）：同一门课、两个不同账号，
 `list_videos` 里同一行回放的 `hqySubId`/`hqyCourseId` 是否完全一致。
-不一致则整套缓存作废（退化成"按标题+时间"的弱匹配）。
+**要测两类课**：一门普通课程（如高等代数），一门名字里带学号的课程（如信息科学技术概论）。
+两类都一致 → 全量可用；只有普通课程一致 → 共享只对普通课程开放；
+都不一致 → 整套缓存作废（退化成"按标题+时间"的弱匹配，不建议做）。
 
 **验收（可执行）**：
-1. A 跑完第 3 次课并分享；
+1. A 跑完第 3 次课，**不点任何按钮**，服务端出现一条记录；
 2. B 在同一列表看到徽标，点"直接使用"；
 3. **10 秒内**（含截图时 30 秒内）B 得到与 A 逐字节相同（`sha256` 一致）的 `retell.md`；
 4. B 的本地目录里**没有** `video.mp4`；
-5. 关掉共享服务，B 的界面只提示"无法查询共享"，其余功能不受影响。
+5. A 换更强模型重跑同一节课 → 服务端仍只有 **1 条**记录，内容是新的；
+6. 关掉共享服务再跑完一节课 → 本地结果正常，只在日志里留一行上传失败。
 
 ---
 

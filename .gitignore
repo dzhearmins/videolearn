@@ -5,6 +5,7 @@
 .state/
 cookies*.json
 *.cookie
+agents.md
 
 # --- generated media / outputs ---
 output/
@@ -32,3 +33,6 @@ venv/
 .idea/
 Thumbs.db
 desktop.ini
+
+# --- tests ---
+tests/

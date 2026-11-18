@@ -8,6 +8,7 @@ from pathlib import Path
 from . import blackboard, iaaa, pipeline
 from .config import load_settings
 from .session import AuthError, BBClient
+from .term import soften_console
 
 
 def _fmt_course(c: blackboard.Course) -> str:
@@ -111,7 +112,7 @@ def cmd_courses(settings) -> int:
 def cmd_doctor(settings) -> int:
     import shutil
 
-    from .media import find_ffmpeg
+    from .media import find_ffmpeg, find_ffprobe
 
     ok = True
     print(f"Python        : {sys.version.split()[0]}")
@@ -126,6 +127,7 @@ def cmd_doctor(settings) -> int:
     ffmpeg = find_ffmpeg()
     print(f"ffmpeg        : {ffmpeg or '未找到（转写必需）'}")
     ok = ok and bool(ffmpeg)
+    print(f"ffprobe       : {find_ffprobe(ffmpeg) or '未找到（流式转写需要）'}")
 
     env = settings.state_dir.parent / ".env"
     print(f".env          : {'存在' if env.exists() else '不存在（需复制 .env.example）'}")
@@ -196,6 +198,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("courses", help="列出可选课程")
     sub.add_parser("doctor", help="检查环境与配置（不输出任何密钥）")
 
+    web = sub.add_parser("web", help="本机网页界面（浏览器里选课、跑转写、看重述）")
+    web.add_argument("--port", type=int, default=8765, help="端口（默认 8765，占用时自动顺延）")
+    web.add_argument("--no-browser", action="store_true", help="不要自动打开浏览器")
+
     run = sub.add_parser("run", help="交互式选择课程/回放并生成文字稿与重述")
     run.add_argument("--url", help="直接给出 playVideo.action 的完整 URL")
     run.add_argument("--title", help="配合 --url 时指定标题")
@@ -230,6 +236,13 @@ def main(argv=None) -> int:
         return cmd_courses(settings)
     if args.cmd == "doctor":
         return cmd_doctor(settings)
+    if args.cmd == "web":
+        from .web import main as web_main
+
+        web_argv = ["--port", str(args.port)]
+        if args.no_browser:
+            web_argv.append("--no-browser")
+        return web_main(web_argv)
 
     # 未给子命令时，等价于 `run`（保留顶层 --model）
     if args.cmd is None:
@@ -245,6 +258,7 @@ def main(argv=None) -> int:
 
 
 def entry() -> None:
+    soften_console()
     try:
         raise SystemExit(main())
     except AuthError as e:

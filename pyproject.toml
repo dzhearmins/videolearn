@@ -17,9 +17,13 @@ dependencies = [
 
 [project.scripts]
 videolearn = "videolearn.cli:entry"
+videolearn-web = "videolearn.web:main"
 
 [tool.setuptools.packages.find]
 include = ["videolearn*"]
+
+[tool.setuptools.package-data]
+"videolearn.webui" = ["*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -42,13 +42,16 @@ pip install -r requirements.txt
 ./run.sh doctor
 ```
 
-`./run.sh` 等价于 `python -m videolearn`，参数原样透传：
+`./run.sh` 默认启动本机网页界面（与 `run.bat` 一致），参数原样透传：
 
 ```bash
-./run.sh            # 交互式跑一节
-./run.sh web        # 本机网页界面（推荐）
+./run.sh            # 本机网页界面（默认，http://127.0.0.1:8765）
+./run.sh --port 8123  # 网页界面，指定端口
 ./run.sh doctor     # 环境自检，会打印 ffmpeg / ffprobe
+./run.sh cli        # 旧版交互式命令行（等价于 python -m videolearn）
 ```
+
+`run.bat` 用法完全相同；`run.bat cli run --course 高等代数` 可以带参数进入旧命令行。
 
 首次执行如果提示 permission denied：`chmod +x run.sh`（Windows 上创建的文件没有可执行位）。
 

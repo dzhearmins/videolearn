@@ -22,7 +22,7 @@ from . import llm, pipeline
 PIPELINE_VERSION = "0.2.0"
 MAX_BUNDLE = 12 * 1024 * 1024
 BUNDLE_FILES = ("retell.md", "transcript.md", "transcript.srt", "notes_map.md", "meta.json")
-MAX_FRAMES = 24
+MAX_FRAMES = 40
 
 
 class ShareError(RuntimeError):

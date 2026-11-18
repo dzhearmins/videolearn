@@ -121,7 +121,7 @@ def server(tmp_path):
 def _call(srv, method, path, body=None, token=None):
     url = f"http://127.0.0.1:{srv.server_port}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "Connection": "close"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -168,31 +168,37 @@ def test_http_register_publish_lookup_bundle(server):
         assert r.read() == blob2
 
 
-def test_http_requires_token_and_valid_key(server):
+def test_http_rejects_missing_token(server):
     srv, _ = server
     with pytest.raises(urllib.error.HTTPError) as e1:
         _call(srv, "POST", "/api/lookup", {"keys": ["1:2"]})
     assert e1.value.code == 401
+    e1.value.close()
 
+
+def test_http_rejects_bad_key(server):
+    srv, _ = server
     _, dev = srv.store.register("A", None, open_register=True)
     # open_register 在 store 层，HTTP 层仍走邀请码；直接拿一个有效设备令牌
     token = _token_for(srv.store, dev["id"])
     with pytest.raises(urllib.error.HTTPError) as e2:
         _call(srv, "POST", "/api/summaries/bad-key", {"meta": {}}, token)
     assert e2.value.code == 404  # 不符合 course:sub 的键不会进路由
+    e2.value.close()
 
 
 def _token_for(store: Store, device_id: int) -> str:
-    # 测试辅助：直接写一个新令牌，绕过邀请码流程
+    # 测试辅助：直接写一个新令牌，绕过邀请码流程（必须和 handler 线程共用 store.lock）
     import secrets
 
     from share_server.server import sha256_bytes
 
     token = secrets.token_urlsafe(16)
-    store.db.execute(
-        "UPDATE devices SET token_hash=? WHERE id=?", (sha256_bytes(token.encode()), device_id)
-    )
-    store.db.commit()
+    with store.lock:
+        store.db.execute(
+            "UPDATE devices SET token_hash=? WHERE id=?", (sha256_bytes(token.encode()), device_id)
+        )
+        store.db.commit()
     return token
 
 

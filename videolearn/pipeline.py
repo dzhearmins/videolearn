@@ -207,6 +207,7 @@ def run_for_video(
             video_path, settings.whisper_model,
             on_progress=on_asr, time_offset=float(start_seconds or 0.0),
             initial_prompt=settings.asr_prompt or None,
+            settings=settings,
         )
         if not segments:
             raise RuntimeError("没有识别到任何语音内容")

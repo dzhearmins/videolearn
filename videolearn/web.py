@@ -27,14 +27,14 @@ import time
 import traceback
 import urllib.parse
 import webbrowser
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import blackboard, iaaa, media, pipeline
 from . import share as sharelib
-from .config import ROOT, Settings, load_settings
+from .config import HOME, ROOT, Settings, load_settings
 from .session import AuthError, BBClient
 from .term import soften_console
 
@@ -65,6 +65,21 @@ MAX_LIVE_BYTES = 512 * 1024
 
 # 可以被"视频存储"管理的文件名（只认这些，绝不按调用方给的任意路径删）
 VIDEO_NAMES = ("video.mp4", "video.ts", "video.m4a")
+
+# 设置页字段 → Settings 属性（远端会话不经过 .env 时用）
+SETTING_FIELDS = {
+    "PKU_STUDENT_ID": "student_id",
+    "PKU_PASSWORD": "password",
+    "DEEPSEEK_API_KEY": "deepseek_api_key",
+    "LLM_MODEL": "llm_model",
+    "LLM_BASE_URL": "llm_base_url",
+    "VIDEOLRN_WHISPER_MODEL": "whisper_model",
+    "VIDEOLRN_AUTO_CLEAN_VIDEO": "auto_clean_video",
+    "VIDEOLRN_ASR_BACKEND": "asr_backend",
+    "ASR_BASE_URL": "asr_base_url",
+    "ASR_API_KEY": "asr_api_key",
+    "ASR_MODEL": "asr_model",
+}
 
 # 长任务运行过程中，任务页要边跑边读的产物（先出现的在前）
 LIVE_ARTIFACTS = (
@@ -179,7 +194,8 @@ class Job:
         return {
             "name": rel,
             "bytes": f.stat().st_size,
-            "url": f"/api/jobs/{self.id}/file?name={urllib.parse.quote(rel)}",
+            # 相对 URL：本地挂在 / 下、内测挂在 /<secret>/ 下都能解析
+            "url": f"api/jobs/{self.id}/file?name={urllib.parse.quote(rel)}",
         }
 
     def summary(self) -> dict:
@@ -190,7 +206,16 @@ class Job:
             "lecture_key": self.params.get("lecture_key"),
             "params": {
                 k: self.params.get(k)
-                for k in ("course_name", "title", "time", "eyes", "stream", "limit_seconds", "from_shared")
+                for k in (
+                    "course_name",
+                    "title",
+                    "time",
+                    "eyes",
+                    "stream",
+                    "limit_seconds",
+                    "start_seconds",
+                    "from_shared",
+                )
             },
             "created": self.created,
             "started": self.started,
@@ -248,7 +273,7 @@ class Job:
                         {
                             "name": rel,
                             "bytes": f.stat().st_size,
-                            "url": f"/api/jobs/{self.id}/file?name={urllib.parse.quote(rel)}",
+                            "url": f"api/jobs/{self.id}/file?name={urllib.parse.quote(rel)}",
                         }
                     )
         return {
@@ -265,6 +290,16 @@ class Job:
                 "vision_model": meta.get("vision_model"),
             },
         }
+
+
+def env_path() -> Path:
+    """当前部署的 .env：VIDEOLRN_HOME 优先，否则回到项目根目录。
+
+    本地模式仍然写项目根目录的 .env；远端内测把 HOME 指到实例目录，
+    代码目录可以只读。
+    """
+    home = os.environ.get("VIDEOLRN_HOME")
+    return (Path(home).expanduser().resolve() if home else ROOT) / ".env"
 
 
 # --------------------------------------------------------------------------
@@ -332,13 +367,118 @@ def artifact_path(out_dir: Path, rel: str) -> Path | None:
     return p
 
 
+def _trim_memory() -> None:
+    """把 glibc 空闲堆还给内核；whisper 跑完一轮后 RSS 会涨，连续任务容易顶到上限。"""
+    if os.name != "posix":
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:  # noqa: BLE001 - 非 glibc 平台忽略
+        pass
+
+
+def _self_rss_mb() -> float:
+    if os.name != "posix":
+        return 0.0
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) / 1024.0
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
+
+
+_WIN_LOCKS: dict[str, threading.Lock] = {}
+_WIN_LOCKS_GUARD = threading.Lock()
+
+
+class JobLock:
+    """跨进程的单任务锁。
+
+    远端内测可能同时开多个实例，但服务器只有 2 核 / 1.6 GB，两个 whisper
+    同时跑会互相拖慢甚至 OOM。POSIX 用 flock；Windows 没有 fcntl，退化为
+    进程内按路径互斥（本地通常只有一个实例）。
+    """
+
+    def __init__(self, path: "Path | str | None") -> None:
+        self.path = Path(path) if path else None
+        self._fh = None
+        self._win_lock: threading.Lock | None = None
+
+    def acquire(self) -> bool:
+        if self.path is None:
+            return True
+        try:
+            import fcntl
+        except ImportError:  # Windows
+            key = str(self.path.resolve())
+            with _WIN_LOCKS_GUARD:
+                lock = _WIN_LOCKS.setdefault(key, threading.Lock())
+            if not lock.acquire(blocking=False):
+                return False
+            self._win_lock = lock
+            return True
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = open(self.path, "a+", encoding="utf-8")
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._fh.seek(0)
+            self._fh.truncate()
+            self._fh.write(f"{os.getpid()} {int(time.time())}\n")
+            self._fh.flush()
+            return True
+        except OSError:
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+                self._fh = None
+            return False
+
+    def release(self) -> None:
+        if self._win_lock is not None:
+            self._win_lock.release()
+            self._win_lock = None
+            return
+        if self._fh is None:
+            return
+        try:
+            import fcntl
+
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            pass
+        try:
+            self._fh.close()
+        except OSError:
+            pass
+        self._fh = None
+
+
 # --------------------------------------------------------------------------
 # 应用状态
 # --------------------------------------------------------------------------
 class App:
-    def __init__(self, key: str, settings: Settings) -> None:
+    def __init__(
+        self,
+        key: str,
+        settings: Settings,
+        *,
+        persist: bool = True,
+        job_lock: "JobLock | None" = None,
+    ) -> None:
         self.key = key
         self.settings = settings
+        # persist=True：本地模式，设置写 .env；False：远端内测的会话，设置只留在内存。
+        self.persist = persist
+        self.job_lock = job_lock
+        self.sid = ""
+        self.last_seen = time.time()
         self.share = sharelib.ShareConfig.from_settings(settings)
         self.jobs: dict[str, Job] = {}
         self.current: str | None = None
@@ -382,6 +522,10 @@ class App:
             "api_key": _mask_key(s.llm_key),
             "llm_model": s.llm_model,
             "whisper_model": s.whisper_model,
+            "asr_backend": s.asr_backend,
+            "asr_base_url": s.asr_base_url,
+            "asr_model": s.asr_model,
+            "asr_api_key": _mask_key(s.asr_api_key),
             "ffmpeg": media.find_ffmpeg() is not None,
             "authenticated": self.authenticated(check=check),
             "share": self.share.describe(),
@@ -391,7 +535,34 @@ class App:
         }
 
     def reload_settings(self) -> None:
+        if not self.persist:
+            return
         self.settings = load_settings()
+        self.share = sharelib.ShareConfig.from_settings(self.settings)
+        self._auth_cache = (0.0, False)
+
+    def apply_settings(self, updates: dict[str, str]) -> None:
+        """保存设置：本地写 .env；远端会话只改内存（密码不落盘）。"""
+        if self.persist:
+            update_env_file(env_path(), updates)
+            for key, value in updates.items():
+                os.environ[key] = value
+            self.reload_settings()
+            return
+        for key, value in updates.items():
+            field_name = SETTING_FIELDS.get(key)
+            if not field_name:
+                continue
+            if field_name == "auto_clean_video":
+                setattr(self.settings, field_name, value == "1")
+            elif field_name in ("llm_base_url", "asr_base_url"):
+                setattr(self.settings, field_name, value.rstrip("/"))
+            elif field_name == "asr_backend":
+                setattr(self.settings, field_name, value.strip().lower() or "local")
+            else:
+                setattr(self.settings, field_name, value)
+            if field_name == "llm_model" and not os.getenv("VISION_MODEL"):
+                self.settings.vision_model = value
         self.share = sharelib.ShareConfig.from_settings(self.settings)
         self._auth_cache = (0.0, False)
 
@@ -427,10 +598,16 @@ class App:
             "SHARE_TOKEN": data["token"],
             "SHARE_NAME": name or "同学",
         }
-        update_env_file(ROOT / ".env", updates)
-        for k, v in updates.items():
-            os.environ[k] = v
-        self.reload_settings()
+        if self.persist:
+            update_env_file(env_path(), updates)
+            for k, v in updates.items():
+                os.environ[k] = v
+            self.reload_settings()
+        else:
+            self.settings.share_server = server
+            self.settings.share_token = data["token"]
+            self.settings.share_name = name or "同学"
+            self.share = sharelib.ShareConfig.from_settings(self.settings)
         return self.share.describe()
 
     # ---- 任务 ----
@@ -438,10 +615,33 @@ class App:
         with self._lock:
             if self.current:
                 raise ApiError(409, "已有任务在跑，请等它结束或刷新页面查看进度。")
+            # 连续跑多个任务后 ctranslate2 的堆会留在进程里；先归还，仍偏高就拒绝，
+            # 避免 1.6 GB 的机器被拖进 swap。
+            if _self_rss_mb() > 650:
+                _trim_memory()
+                if _self_rss_mb() > 650:
+                    raise ApiError(
+                        503,
+                        "服务器内存紧张（前面任务还没完全释放），请过几分钟再试。",
+                    )
+            if self.job_lock is not None and not self.job_lock.acquire():
+                raise ApiError(
+                    409,
+                    "服务器上另一位内测同学正在跑任务（只有 2 核，任务需要排队）。"
+                    "请过几分钟再试。",
+                )
             job = Job(id=secrets.token_hex(4), params=params)
             self.jobs[job.id] = job
             self.current = job.id
-        threading.Thread(target=self._run, args=(job,), daemon=True).start()
+        try:
+            threading.Thread(target=self._run, args=(job,), daemon=True).start()
+        except BaseException:
+            with self._lock:
+                self.jobs.pop(job.id, None)
+                self.current = None
+            if self.job_lock is not None:
+                self.job_lock.release()
+            raise
         return job
 
     def _run(self, job: Job) -> None:
@@ -449,6 +649,10 @@ class App:
         job.started = time.time()
         p = job.params
         try:
+            threads = int(p.get("asr_threads") or os.getenv("VIDEOLRN_ASR_THREADS") or 0)
+            if not threads:
+                threads = os.cpu_count() or 4
+            threads = max(1, min(16, threads))
             if p.get("from_shared"):
                 self._run_shared(job)
                 job.state = "done"
@@ -463,11 +667,12 @@ class App:
                     play_url=p["play_url"],
                     course_name=p["course_name"],
                     limit_seconds=p.get("limit_seconds"),
+                    start_seconds=float(p.get("start_seconds") or 0.0),
                     eyes=bool(p.get("eyes")),
                     stream=bool(p.get("stream", True)),
                     chunk_seconds=float(p.get("chunk_seconds", 240.0)),
                     overlap_seconds=float(p.get("overlap_seconds", 5.0)),
-                    asr_threads=int(p.get("asr_threads", 8)),
+                    asr_threads=threads,
                     on_out_dir=lambda path: setattr(job, "out_dir", path),
                 )
             job.out_dir = result.out_dir
@@ -489,6 +694,9 @@ class App:
             job.sink.finish(job.state)
             with self._lock:
                 self.current = None
+            if self.job_lock is not None:
+                self.job_lock.release()
+            _trim_memory()
 
     def _run_shared(self, job: Job) -> None:
         """命中共享：只下载 zip + 解包，不登录教学网、不下载视频、不跑 ASR。"""
@@ -639,14 +847,111 @@ class App:
 
 
 # --------------------------------------------------------------------------
+# 远端内测：每个浏览器一个隔离会话
+# --------------------------------------------------------------------------
+SESSION_COOKIE = "vl_sid"
+SESSION_SID_RE = re.compile(r"^[0-9A-Za-z_-]{16,64}$")
+SESSION_TTL = 7 * 24 * 3600  # Cookie 有效期；内存会话随进程重启清空
+
+
+class SessionStore:
+    """给每个浏览器发一个 sid，凭 sid 分配独立的 Settings / output / jobs。
+
+    远端内测的关键约束：
+    - 设置（含 PKU 密码、API Key）只存在进程内存，不写 .env、不落盘；
+    - 每个会话的 output/ 与 state/ 相互隔离，A 看不到 B 的课程、任务和产物；
+    - 所有会话共享一个 JobLock，服务器一次只跑一个任务。
+    """
+
+    def __init__(
+        self,
+        key: str,
+        base_settings: Settings,
+        root: Path,
+        *,
+        cookie_path: str = "/",
+        job_lock: JobLock | None = None,
+    ) -> None:
+        self.key = key
+        self.base = base_settings
+        self.root = Path(root)
+        self.cookie_path = cookie_path if cookie_path.startswith("/") else "/" + cookie_path
+        if not self.cookie_path.endswith("/"):
+            self.cookie_path += "/"
+        self.job_lock = job_lock
+        self.sessions: dict[str, App] = {}
+        self._lock = threading.Lock()
+        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.chmod(0o700)
+        except OSError:
+            pass
+
+    def get(self, sid: str | None) -> tuple[App, str, bool]:
+        """返回 (会话 App, sid, 是否新建)。sid 不合法或不存在时新建。"""
+        sid = (sid or "").strip()
+        with self._lock:
+            app = self.sessions.get(sid) if SESSION_SID_RE.fullmatch(sid) else None
+            if app is not None:
+                app.last_seen = time.time()
+                return app, sid, False
+            if not SESSION_SID_RE.fullmatch(sid):
+                sid = secrets.token_urlsafe(24)
+            app = self._create(sid)
+            self.sessions[sid] = app
+            # 防御性上限：会话太多时丢掉最久没动的（文件保留，不删用户产物）
+            if len(self.sessions) > 200:
+                oldest = min(self.sessions.values(), key=lambda a: a.last_seen)
+                self.sessions.pop(oldest.sid, None)
+            return app, sid, True
+
+    def _create(self, sid: str) -> App:
+        home = self.root / sid
+        output = home / "output"
+        state = home / "state"
+        output.mkdir(parents=True, exist_ok=True)
+        state.mkdir(parents=True, exist_ok=True)
+        for path in (home, state, output):
+            try:
+                path.chmod(0o700)
+            except OSError:
+                pass
+        # 只清空 PKU 凭据；LLM Key / 模型 / 共享配置可来自服务器级 .env，
+        # 作为内测的统一默认值（个人可在设置里覆盖）。
+        settings = replace(
+            self.base,
+            student_id="",
+            password="",
+            state_dir=state,
+            output_dir=output,
+        )
+        app = App(self.key, settings, persist=False, job_lock=self.job_lock)
+        app.sid = sid
+        return app
+
+
+# --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
-def _index_html(key: str) -> bytes:
+def _index_html(
+    key: str,
+    *,
+    notice: str = "",
+    sample_seconds: int = 600,
+    sample_start_seconds: int = 0,
+) -> bytes:
     from importlib.resources import files
 
     raw = files("videolearn.webui").joinpath("index.html").read_text(encoding="utf-8")
     # 占位符单独命名，避免替换到 window.__VL_KEY__ 这类标识符内部
-    return raw.replace("__VL_KEY_JSON__", json.dumps(key)).encode("utf-8")
+    notice_json = json.dumps(notice, ensure_ascii=False).replace("<", "\\u003c")
+    raw = raw.replace("__VL_KEY_JSON__", json.dumps(key))
+    raw = raw.replace("__VL_NOTICE_JSON__", notice_json)
+    raw = raw.replace("__VL_SAMPLE_SECONDS__", str(max(10, int(sample_seconds))))
+    raw = raw.replace(
+        "__VL_SAMPLE_START_SECONDS__", str(max(0, int(sample_start_seconds)))
+    )
+    return raw.encode("utf-8")
 
 
 def _strip_leading_notice(text: str) -> str:
@@ -681,7 +986,33 @@ class Handler(BaseHTTPRequestHandler):
     # ---- 基础 ----
     @property
     def app(self) -> App:
-        return self.server.app  # type: ignore[attr-defined]
+        store = getattr(self.server, "sessions", None)
+        if store is None:
+            return self.server.app  # type: ignore[attr-defined]
+        app, sid, new = store.get(self._sid_value())
+        if new:
+            self._new_sid = sid
+        return app
+
+    def _sid_value(self) -> str:
+        raw = self.headers.get("Cookie") or ""
+        try:
+            jar = SimpleCookie(raw)
+            return jar[SESSION_COOKIE].value if SESSION_COOKIE in jar else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _sid_cookie_header(self) -> None:
+        sid = getattr(self, "_new_sid", None)
+        if not sid:
+            return
+        store = getattr(self.server, "sessions", None)
+        path = store.cookie_path if store is not None else "/"
+        self.send_header(
+            "Set-Cookie",
+            f"{SESSION_COOKIE}={sid}; Path={path}; Max-Age={SESSION_TTL}; "
+            "HttpOnly; SameSite=Lax",
+        )
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: D102
         return
@@ -693,6 +1024,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self._sid_cookie_header()
         self.end_headers()
         self.wfile.write(body)
 
@@ -702,6 +1034,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._sid_cookie_header()
         self.end_headers()
         self.wfile.write(body)
 
@@ -751,6 +1084,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- 路由 ----
     def do_GET(self) -> None:  # noqa: N802
+        self._new_sid = None
         try:
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
@@ -779,6 +1113,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._job_route(path, query)
             else:
                 self._json({"error": "not_found"}, 404)
+        except SystemExit as exc:
+            # require_pku_credentials / 缺少配置时抛的是 SystemExit，不能让它穿透请求线程
+            self._json({"error": str(exc) or "缺少配置", "need_config": True}, 400)
         except ApiError as exc:
             self._json({"error": str(exc)}, exc.status)
         except AuthError as exc:
@@ -790,6 +1127,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._new_sid = None
         try:
             parsed = urllib.parse.urlparse(self.path)
             if not self._guard():
@@ -808,6 +1146,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, **self.app.delete_video(rel)})
             else:
                 self._json({"error": "not_found"}, 404)
+        except SystemExit as exc:
+            # require_pku_credentials / 缺少配置时抛的是 SystemExit，不能让它穿透请求线程
+            self._json({"error": str(exc) or "缺少配置", "need_config": True}, 400)
         except ApiError as exc:
             self._json({"error": str(exc)}, exc.status)
         except AuthError as exc:
@@ -823,12 +1164,21 @@ class Handler(BaseHTTPRequestHandler):
         supplied = key or ""
         authorized = (supplied and secrets.compare_digest(supplied, self.app.key)) or self._token_ok()
         if not authorized:
-            self._text(
-                "未授权。请使用启动时终端里打印的 http://127.0.0.1:<port>/?k=... 链接打开。",
-                403,
-            )
+            if getattr(self.server, "sessions", None) is not None:
+                message = "未授权：请从管理员发给你的内测链接打开，或联系管理员。"
+            else:
+                message = (
+                    "未授权。请使用启动时终端里打印的 "
+                    "http://127.0.0.1:<port>/?k=... 链接打开。"
+                )
+            self._text(message, 403)
             return
-        body = _index_html(self.app.key)
+        body = _index_html(
+            self.app.key,
+            notice=getattr(self.server, "notice", ""),
+            sample_seconds=getattr(self.server, "sample_seconds", 600),
+            sample_start_seconds=getattr(self.server, "sample_start_seconds", 0),
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -837,11 +1187,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", CSP)
-        if supplied:
+        # 远端模式由 nginx 注入 X-VL-Key；本地模式才把 ?k 存成 Cookie。
+        if supplied and getattr(self.server, "sessions", None) is None:
             self.send_header(
                 "Set-Cookie",
                 f"vl_key={self.app.key}; Path=/; HttpOnly; SameSite=Strict",
             )
+        self._sid_cookie_header()
         self.end_headers()
         self.wfile.write(body)
 
@@ -900,22 +1252,22 @@ class Handler(BaseHTTPRequestHandler):
             "llm_model": "LLM_MODEL",
             "whisper_model": "VIDEOLRN_WHISPER_MODEL",
             "llm_base_url": "LLM_BASE_URL",
+            "asr_backend": "VIDEOLRN_ASR_BACKEND",
+            "asr_base_url": "ASR_BASE_URL",
+            "asr_model": "ASR_MODEL",
+            "asr_api_key": "ASR_API_KEY",
         }
         for field_name, env_key in mapping.items():
             value = body.get(field_name)
             if value is None:
                 continue
             value = str(value).strip() if field_name != "password" else str(value)
-            if field_name in ("password", "api_key") and value == "":
+            if field_name in ("password", "api_key", "asr_api_key") and value == "":
                 continue  # 留空表示不修改
             updates[env_key] = value
         if not updates:
             raise ApiError(400, "没有需要保存的字段")
-        env_path = ROOT / ".env"
-        update_env_file(env_path, updates)
-        for key, value in updates.items():
-            os.environ[key] = value
-        self.app.reload_settings()
+        self.app.apply_settings(updates)
         self._json({"ok": True, "status": self.app.status(check=False)})
 
     def _login(self) -> None:
@@ -953,6 +1305,16 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "小样时长必须是数字") from exc
             if not 10 <= limit_seconds <= 3600:
                 raise ApiError(400, "小样时长需在 10–3600 秒之间")
+        start_seconds = body.get("start_seconds")
+        if start_seconds is None or limit_seconds is None:
+            start_seconds = 0.0
+        else:
+            try:
+                start_seconds = float(start_seconds)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, "起点必须是数字") from exc
+            if not 0 <= start_seconds <= 86400:
+                raise ApiError(400, "起点需在 0–86400 秒之间")
         params = {
             "play_url": play_url,
             "title": title,
@@ -964,6 +1326,7 @@ class Handler(BaseHTTPRequestHandler):
             "eyes": bool(body.get("eyes", True)),
             "stream": bool(body.get("stream", True)),
             "limit_seconds": limit_seconds,
+            "start_seconds": start_seconds,
         }
         job = self.app.start_job(params)
         self._json({"job": job.summary()}, 202)
@@ -1010,11 +1373,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(404, "文件不存在或不允许访问")
             data = p.read_bytes()
             ctype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+            if ctype.startswith("text/") or ctype == "application/json":
+                if "charset" not in ctype:
+                    ctype += "; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self._sid_cookie_header()
             self.end_headers()
             self.wfile.write(data)
             return
@@ -1047,23 +1414,82 @@ def main(argv: list[str] | None = None) -> int:
     soften_console()
     parser = argparse.ArgumentParser(
         prog="videolearn web",
-        description="本机网页界面：浏览器里选课、跑转写、看重述（只监听本机）",
+        description="网页界面：浏览器里选课、跑转写、看重述（只监听回环地址）",
     )
     parser.add_argument("--port", type=int, default=8765, help="端口（默认 8765，占用时自动顺延）")
     parser.add_argument("--no-browser", action="store_true", help="不要自动打开浏览器")
+    parser.add_argument("--key", default=os.getenv("VIDEOLRN_WEB_KEY", ""), help="固定访问令牌")
+    parser.add_argument(
+        "--sessions",
+        action="store_true",
+        help="远端内测模式：每个浏览器独立会话，设置只存内存，不写 .env",
+    )
+    parser.add_argument(
+        "--sessions-root",
+        default=os.getenv("VIDEOLRN_SESSIONS", ""),
+        help="会话目录（默认 <VIDEOLRN_HOME>/sessions）",
+    )
+    parser.add_argument(
+        "--cookie-path",
+        default=os.getenv("VIDEOLRN_COOKIE_PATH", "/"),
+        help="会话 Cookie 的 Path（例如 /vl-xxxx/）",
+    )
+    parser.add_argument(
+        "--job-lock",
+        default=os.getenv("VIDEOLRN_JOB_LOCK", ""),
+        help="跨进程任务锁文件（默认 <sessions-root>/.job.lock）",
+    )
+    parser.add_argument("--public-url", default=os.getenv("VIDEOLRN_PUBLIC_URL", ""))
+    parser.add_argument(
+        "--notice",
+        default=os.getenv("VIDEOLRN_WEB_NOTICE", ""),
+        help="页面顶部提示（内测环境用来写 HTTP/小样等注意事项）",
+    )
+    parser.add_argument(
+        "--sample-seconds",
+        type=int,
+        default=int(os.getenv("VIDEOLRN_SAMPLE_SECONDS", "600") or 600),
+        help="「只跑前 N 秒」的默认值（本地 600；2 核服务器建议 90–120）",
+    )
+    parser.add_argument(
+        "--sample-start-seconds",
+        type=int,
+        default=int(os.getenv("VIDEOLRN_SAMPLE_START_SECONDS", "0") or 0),
+        help="小样默认起点秒数（远端建议 600，跳过课堂开头可能安静的部分）",
+    )
     args = parser.parse_args(argv)
 
     settings = load_settings()
-    key = secrets.token_urlsafe(18)
-    # 固定只监听回环地址：这不是多用户服务，也没有做跨机访问的安全模型。
+    key = args.key or secrets.token_urlsafe(18)
+    # 固定只监听回环地址：公网入口由 nginx 反代，并负责 Basic 认证。
     server = bind("127.0.0.1", args.port)
-    server.app = App(key, settings)
+    server.notice = args.notice  # type: ignore[attr-defined]
+    server.sample_seconds = args.sample_seconds  # type: ignore[attr-defined]
+    server.sample_start_seconds = args.sample_start_seconds  # type: ignore[attr-defined]
+    if args.sessions:
+        root = Path(args.sessions_root) if args.sessions_root else HOME / "sessions"
+        lock_path = Path(args.job_lock) if args.job_lock else root / ".job.lock"
+        server.sessions = SessionStore(  # type: ignore[attr-defined]
+            key,
+            settings,
+            root,
+            cookie_path=args.cookie_path,
+            job_lock=JobLock(lock_path),
+        )
+    else:
+        server.app = App(key, settings)  # type: ignore[attr-defined]
     url = f"http://127.0.0.1:{server.server_port}/?k={key}"
 
     print()
-    print("  北京大学回放课程 helper · 本机网页界面")
-    print(f"  打开： {url}")
-    print("  （这个链接含一次性访问令牌，别发给别人；Ctrl+C 结束）")
+    print("  北京大学回放课程 helper · 网页界面")
+    if args.sessions:
+        print("  模式：远端内测（每个浏览器独立会话；设置只存内存）")
+        print(f"  公网入口： {args.public_url or '(由 nginx 反代)'}")
+        # 不打印令牌：它已经写进 web.env，避免落到 journal / 日志里
+        print("  访问令牌：已从 VIDEOLRN_WEB_KEY 读取")
+    else:
+        print(f"  打开： {url}")
+    print("  （访问令牌别发给无关的人；Ctrl+C 结束）")
     print(flush=True)
     if not args.no_browser:
         threading.Timer(0.8, webbrowser.open, args=(url,)).start()

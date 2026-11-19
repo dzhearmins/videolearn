@@ -99,7 +99,11 @@ FFmpeg **必需**（解码音频、抽帧、TS 转封装），并且要带 `ffpr
 | `LLM_BASE_URL` | 否 | 默认 `https://api.deepseek.com` |
 | `LLM_MODEL` | 否 | 默认 `deepseek-chat` |
 | `VISION_MODEL` | 否 | 眼睛用的视觉模型，默认同 `LLM_MODEL`，必须支持图片 |
-| `VIDEOLRN_WHISPER_MODEL` | 否 | `tiny/base/small/medium/large-v3`，默认 `small` |
+| `VIDEOLRN_WHISPER_MODEL` | 否 | 本地模型：`tiny/base/small/medium/large-v3`，默认 `small` |
+| `VIDEOLRN_ASR_BACKEND` | 否 | `local`（默认）或 `cloud`；云端见 [docs/cloud-asr.md](docs/cloud-asr.md) |
+| `ASR_BASE_URL` / `ASR_MODEL` / `ASR_API_KEY` | 否 | 云端 ASR 的 OpenAI 兼容地址、模型、Key |
+| `ASR_LANGUAGE` / `ASR_TIMEOUT` / `ASR_CHUNK_SECONDS` | 否 | 云端语言（默认 `zh`）、超时、分块秒数 |
+| `ASR_RESPONSE_FORMAT` | 否 | `json`（默认）或 `verbose_json`；Groq/OpenAI 用后者拿时间戳 |
 | `VIDEOLRN_ASR_PROMPT` | 否 | 本课术语，帮助 ASR 断句（不会让模型编内容） |
 | `VIDEOLRN_MAX_INPUT_TOKENS` | 否 | 单次 LLM 输入预算，默认 60000（按 1 token/字符保守估算） |
 | `VIDEOLRN_AUTO_CLEAN_VIDEO` | 否 | `1` 时任务完成后自动删除视频，默认 `0` |
@@ -120,6 +124,36 @@ FFmpeg **必需**（解码音频、抽帧、TS 转封装），并且要带 `ffpr
 3. 首页「视频存储」列出 `output/` 下所有已下载视频（体积、时间、是否正在使用），可逐个删除；
    设置里可以打开「任务完成后自动删除视频」（默认关闭，只删视频，文字稿/截图都保留）。
 4. 设置页还能改模型、填共享服务。服务只监听 `127.0.0.1`，所有接口要求令牌。
+
+### 远端内测（可选）
+
+如果想让朋友不 clone 代码也能打开网页，可加 `--sessions` 由 nginx 反代到一个
+秘密路径（Basic 认证 + 每浏览器独立会话）：
+
+```bash
+python -m videolearn web --sessions --port 8766 \
+  --cookie-path /<秘密路径>/ --sample-seconds 90 \
+  --notice "内测环境：HTTP 明文，请勿使用主账号密码"
+```
+
+每个浏览器的学号/密码/API Key 只存在进程内存、不写 `.env`；所有会话共享一把
+任务锁（一次只跑一个任务）。部署、安全边界和运维命令见
+[docs/remote-beta.md](docs/remote-beta.md)。
+
+### 云端转写（可选，推荐）
+
+本地 CPU 转写慢、数学术语容易听错时，可切到第三方云端 ASR：
+
+```bash
+VIDEOLRN_ASR_BACKEND=cloud
+ASR_BASE_URL=https://api.siliconflow.cn/v1
+ASR_MODEL=Qwen/Qwen3-ASR-1.7B
+ASR_API_KEY=sk-...
+```
+
+也支持 Groq / OpenAI / 任何兼容 `/audio/transcriptions` 的端点；音频按
+`ASR_CHUNK_SECONDS` 分块上传，时间戳是句级近似。配置、隐私和排错见
+[docs/cloud-asr.md](docs/cloud-asr.md)。
 
 ## 命令行
 
@@ -231,11 +265,14 @@ Windows 已实机验证；macOS / Linux 代码已做平台分支（ffmpeg/ffprob
 - 只使用你自己的账号、只下载你有权限的课程，供个人复习；视频画面带有“未经授权不得翻录转载”提示，请勿再分发。
 - 密码只用于 IAAA 登录（RSA PKCS#1 v1.5 加密后提交），日志不输出密码、token、Cookie、`auth_data`。
 - 网页界面只监听 `127.0.0.1`；共享服务只接收文字/截图，设备令牌可撤销。
+- 远端内测模式（`--sessions`）仍只监听回环地址，由 nginx 的 Basic 认证和秘密路径
+  对外；**当前部署只有 HTTP，没有 TLS**，只适合可信小圈子，学号/密码/Key 在链路上
+  是明文，详见 [docs/remote-beta.md](docs/remote-beta.md)。
 
 ## 已知限制
 
 - **CPU 转写慢**：`small` 在一台 i7-13700H 笔记本上约 3–5× 实时（含模型加载），2 小时课约 25–40 分钟；
-  想更快用 `--limit-seconds` 先验证，或换 `base`。
+  想更快用 `--limit-seconds` 先验证、换 `base`，或切[云端转写](docs/cloud-asr.md)。
 - 数学公式是 ASR 的弱项，转写可能失真；`retell.md` 会标注存疑处，请对照视频核对。
 - 眼睛受截图分辨率与视觉模型能力限制，小字、连笔、遮挡都可能读错；重要公式请点开原图核对。
 - 一次批量看图依赖端点支持多图；不同模型支持数量不同。
@@ -271,4 +308,5 @@ python -m compileall -q videolearn
 
 更多设计说明：[docs/cross-platform.md](docs/cross-platform.md)、
 [docs/shared-summary-cache.md](docs/shared-summary-cache.md)、
-[docs/centralized-service-architecture.md](docs/centralized-service-architecture.md)。
+[docs/centralized-service-architecture.md](docs/centralized-service-architecture.md)、
+[docs/remote-beta.md](docs/remote-beta.md)、[docs/cloud-asr.md](docs/cloud-asr.md)。

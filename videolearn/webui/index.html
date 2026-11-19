@@ -183,6 +183,7 @@
 </style>
 </head>
 <body>
+<div id="notice" style="display:none;background:#7a2f00;color:#fff;padding:8px 14px;font-size:13px;line-height:1.5;text-align:center;"></div>
 <header>
   <h1>回放课程 helper</h1>
   <span id="status-pill" class="pill">检查中…</span>
@@ -203,6 +204,7 @@
         <label><input type="checkbox" id="opt-eyes" checked> 眼睛（截图读板书）</label>
         <label><input type="checkbox" id="opt-stream" checked> 流式初稿</label>
         <label><input type="checkbox" id="opt-sample"> 只跑前 <span id="opt-sample-secs"></span> 秒（快速验证）</label>
+        <label>起点 <input type="number" id="opt-start-min" min="0" max="240" step="1" value="0" style="width:58px;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)"> 分钟</label>
       </div>
 
       <div id="queue-banner" class="queue" hidden>
@@ -299,7 +301,7 @@
     <label>密码 <input name="password" type="password" autocomplete="current-password" placeholder="留空则不修改"></label>
     <label>DeepSeek API Key <input name="api_key" type="password" placeholder="留空则不修改"></label>
     <label>LLM 模型 <input name="llm_model" placeholder="deepseek-chat"></label>
-    <label>转写模型
+    <label>本地转写模型
       <select name="whisper_model">
         <option value="">（不修改）</option>
         <option value="tiny">tiny（最快，最不准）</option>
@@ -309,6 +311,17 @@
         <option value="large-v3">large-v3（很慢）</option>
       </select>
     </label>
+
+    <label>转写方式
+      <select name="asr_backend">
+        <option value="">（不修改）</option>
+        <option value="local">本地 faster-whisper</option>
+        <option value="cloud">云端 ASR（推荐，快且更准）</option>
+      </select>
+    </label>
+    <label>云 ASR 服务地址 <input name="asr_base_url" placeholder="https://api.siliconflow.cn/v1"></label>
+    <label>云 ASR 模型 <input name="asr_model" placeholder="Qwen/Qwen3-ASR-1.7B"></label>
+    <label>云 ASR API Key <input name="asr_api_key" type="password" placeholder="留空不修改"></label>
 
     <label class="check"><input type="checkbox" name="auto_cleanup"> 任务完成后自动删除视频（默认关闭）</label>
 
@@ -334,9 +347,17 @@
 const KEY = __VL_KEY_JSON__;
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-// 小样/调试设置：只分析视频开头的这么多秒，便于快速验证效果
-const SAMPLE_SECONDS = 600;
+const NOTICE = __VL_NOTICE_JSON__;
+if (NOTICE) {
+  const n = $('notice');
+  n.textContent = NOTICE;
+  n.style.display = 'block';
+}
+// 小样/调试设置：从第 N 分钟起只分析这么多秒，便于快速验证效果
+const SAMPLE_SECONDS = __VL_SAMPLE_SECONDS__;
+const SAMPLE_START_SECONDS = __VL_SAMPLE_START_SECONDS__;
 $('opt-sample-secs').textContent = SAMPLE_SECONDS;
+$('opt-start-min').value = Math.max(0, Math.round(SAMPLE_START_SECONDS / 60));
 
 const app = {
   authenticated: false,
@@ -417,7 +438,7 @@ function setPill(text, cls) {
 // ---------------------------------------------------------------- 状态
 async function refreshStatus(check) {
   try {
-    const s = await api('/api/status' + (check ? '?check=1' : ''));
+    const s = await api('api/status' + (check ? '?check=1' : ''));
     app.authenticated = s.authenticated;
     app.share = s.share || {};
     if (!s.has_password) setPill('缺配置 · 点右上角设置', 'bad');
@@ -433,7 +454,7 @@ async function refreshStatus(check) {
 
 async function ensureJobs() {
   try {
-    const data = await api('/api/jobs');
+    const data = await api('api/jobs');
     for (const j of (data.jobs || [])) app.jobs.set(j.id, j);
   } catch (e) { /* 未登录也能看任务，失败就忽略 */ }
 }
@@ -443,7 +464,7 @@ async function loadCourses() {
   const box = $('course-list');
   box.innerHTML = '<div class="empty">加载中…</div>';
   try {
-    const data = await api('/api/courses');
+    const data = await api('api/courses');
     app.courses = data.courses || [];
     app.authenticated = true;
     setPill('已登录', 'ok');
@@ -488,7 +509,7 @@ async function loadVideos(c) {
   const box = $('video-list');
   box.innerHTML = '<div class="empty">加载回放…</div>';
   try {
-    const data = await api('/api/videos?course=' + encodeURIComponent(c.key));
+    const data = await api('api/videos?course=' + encodeURIComponent(c.key));
     app.videos = data.videos || [];
     renderVideos();
   } catch (e) {
@@ -557,7 +578,7 @@ function renderVideos() {
 // ---------------------------------------------------------------- 视频存储
 async function loadStorage() {
   try {
-    renderStorage(await api('/api/storage'));
+    renderStorage(await api('api/storage'));
   } catch (e) {
     $('storage-list').innerHTML = '<div class="empty">读取失败</div>';
   }
@@ -598,7 +619,7 @@ async function deleteVideo(item, btn) {
   btn.disabled = true;
   btn.textContent = '删除中…';
   try {
-    const data = await api('/api/storage/delete', {
+    const data = await api('api/storage/delete', {
       method: 'POST',
       body: JSON.stringify({ rel: item.rel }),
     });
@@ -624,8 +645,11 @@ async function startJob(v, btn) {
       eyes: $('opt-eyes').checked,
       stream: $('opt-stream').checked,
       limit_seconds: $('opt-sample').checked ? SAMPLE_SECONDS : null,
+      start_seconds: $('opt-sample').checked
+        ? Math.max(0, Math.round(Number($('opt-start-min').value || 0) * 60))
+        : 0,
     };
-    const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
+    const data = await api('api/jobs', { method: 'POST', body: JSON.stringify(body) });
     app.jobs.set(data.job.id, data.job);
     renderVideos();
     showQueueBanner(data.job);
@@ -647,7 +671,7 @@ function showQueueBanner(job) {
 async function startSharedJob(v) {
   if (!v.shared) return;
   try {
-    const data = await api('/api/jobs', {
+    const data = await api('api/jobs', {
       method: 'POST',
       body: JSON.stringify({
         play_url: v.play_url,
@@ -726,7 +750,7 @@ async function showTask(courseKey, jobId) {
 
   let job = jobId ? app.jobs.get(jobId) : null;
   if (jobId && !job) {
-    job = await api('/api/jobs/' + jobId).catch(() => null);
+    job = await api('api/jobs/' + jobId).catch(() => null);
     if (job) app.jobs.set(job.id, job);
   }
 
@@ -807,7 +831,9 @@ function renderJobStatic(job) {
   if (p.time) bits.push(p.time);
   bits.push(p.eyes ? '眼睛' : '无眼睛');
   bits.push(p.stream ? '流式' : '批量');
-  if (p.limit_seconds) bits.push('小样 ' + p.limit_seconds + 's');
+  if (p.limit_seconds) {
+    bits.push('小样 ' + (p.start_seconds ? fmtDuration(p.start_seconds) + ' 起 ' : '') + p.limit_seconds + 's');
+  }
   const sh = job.share || {};
   if (sh.state === 'done') bits.push('已自动上传');
   else if (sh.state === 'uploading') bits.push('自动上传中…');
@@ -823,7 +849,7 @@ function renderJobStatic(job) {
 
 async function refreshJobOnce(jobId) {
   try {
-    const job = await api('/api/jobs/' + jobId);
+    const job = await api('api/jobs/' + jobId);
     app.jobs.set(job.id, job);
     if (app.jobId === job.id) renderJobStatic(job);
   } catch (e) { /* 后台刷新失败就算了 */ }
@@ -894,7 +920,7 @@ async function pollLog(job) {
   while (token.active && app.jobId === job.id) {
     let data;
     try {
-      data = await api(`/api/jobs/${job.id}/log?after=${app.cursor}&wait=20`);
+      data = await api(`api/jobs/${job.id}/log?after=${app.cursor}&wait=20`);
     } catch (e) {
       if (!token.active || app.jobId !== job.id) return;
       if (e.status === 404) return;
@@ -918,7 +944,7 @@ async function pollLive(job) {
   while (token.active && app.jobId === job.id) {
     let data;
     try {
-      data = await api(`/api/jobs/${job.id}/live`);
+      data = await api(`api/jobs/${job.id}/live`);
     } catch (e) {
       await sleep(1500);
       continue;
@@ -958,12 +984,12 @@ function updateLive(data) {
 }
 
 async function finishJob(jobId) {
-  const job = await api('/api/jobs/' + jobId).catch(() => null);
+  const job = await api('api/jobs/' + jobId).catch(() => null);
   if (!job) return;
   app.jobs.set(job.id, job);
   renderTaskList(app.courseKey);
   renderJobStatic(job);
-  const live = await api('/api/jobs/' + jobId + '/live').catch(() => null);
+  const live = await api('api/jobs/' + jobId + '/live').catch(() => null);
   if (live) updateLive(live);
   if (job.state === 'done') toast('完成：' + displayTitle(job.params.title), true);
   else if (job.state === 'failed') toast('任务失败：' + (job.error || ''));
@@ -1089,7 +1115,7 @@ function renderPreview(el, text) {
       el.append(pre);
     }
     const img = document.createElement('img');
-    img.src = '/api/jobs/' + app.jobId + '/file?name=' + encodeURIComponent(m[2]);
+    img.src = 'api/jobs/' + app.jobId + '/file?name=' + encodeURIComponent(m[2]);
     img.alt = m[1];
     img.loading = 'lazy';
     const cap = document.createElement('span');
@@ -1127,7 +1153,7 @@ $('btn-login').onclick = async () => {
   $('btn-login').disabled = true;
   $('btn-login').textContent = '登录中…';
   try {
-    await api('/api/login', { method: 'POST', body: '{}' });
+    await api('api/login', { method: 'POST', body: '{}' });
     toast('登录成功', true);
     await loadCourses();
   } catch (e) {
@@ -1147,6 +1173,10 @@ $('btn-settings').onclick = async () => {
     f.api_key.placeholder = s.api_key ? ('已保存 ' + s.api_key + '（留空不改）') : 'sk-...';
     f.llm_model.value = s.llm_model || '';
     f.whisper_model.value = '';
+    f.asr_backend.value = '';
+    f.asr_base_url.placeholder = s.asr_base_url || 'https://api.siliconflow.cn/v1';
+    f.asr_model.placeholder = s.asr_model || 'Qwen/Qwen3-ASR-1.7B';
+    f.asr_api_key.placeholder = s.asr_api_key ? ('已保存 ' + s.asr_api_key + '（留空不改）') : 'sk-...';
     f.auto_cleanup.checked = !!s.auto_clean_video;
     if (s.share) {
       f.share_server.value = s.share.server || '';
@@ -1169,6 +1199,10 @@ $('settings-form').addEventListener('submit', async (ev) => {
     password: f.password.value,
     api_key: f.api_key.value.trim(),
     llm_model: f.llm_model.value.trim(),
+    asr_backend: f.asr_backend.value,
+    asr_base_url: f.asr_base_url.value.trim(),
+    asr_model: f.asr_model.value.trim(),
+    asr_api_key: f.asr_api_key.value.trim(),
     auto_cleanup: f.auto_cleanup.checked,
   };
   if (f.whisper_model.value) body.whisper_model = f.whisper_model.value;
@@ -1176,11 +1210,12 @@ $('settings-form').addEventListener('submit', async (ev) => {
   if (!Object.keys(body).length) { $('settings-dialog').close(); return; }
   $('settings-save').disabled = true;
   try {
-    await api('/api/settings', { method: 'POST', body: JSON.stringify(body) });
+    await api('api/settings', { method: 'POST', body: JSON.stringify(body) });
     toast('已保存到 .env', true);
     $('settings-dialog').close();
     f.password.value = '';
     f.api_key.value = '';
+    f.asr_api_key.value = '';
     await refreshStatus(false);
     if (app.authenticated) await loadCourses();
   } catch (e) {
@@ -1204,7 +1239,7 @@ $('btn-share-register').onclick = async () => {
   btn.disabled = true;
   btn.textContent = '注册中…';
   try {
-    const data = await api('/api/share/register', { method: 'POST', body: JSON.stringify(body) });
+    const data = await api('api/share/register', { method: 'POST', body: JSON.stringify(body) });
     app.share = data.share || {};
     f.share_invite.value = '';
     $('share-hint').textContent = `已连接：${app.share.server}（${app.share.name}）`;

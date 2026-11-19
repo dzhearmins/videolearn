@@ -206,13 +206,13 @@ def run_streaming(
     first_token: float | None = None
     errors: list[str] = []
     lock = threading.Lock()
+    backend_name = ""
 
     def asr_body() -> None:
-        from faster_whisper import WhisperModel
-
-        wm = WhisperModel(
-            settings.whisper_model, device="cpu", compute_type="int8", cpu_threads=threads
-        )
+        nonlocal backend_name
+        backend = asr.make_backend(settings, threads=threads, streaming=True)
+        backend_name = backend.name
+        print(f"[asr] 后端：{backend.name}", flush=True)
         partial_md.write_text(f"# 流式文字稿：{title}\n\n", encoding="utf-8")
         for i, chunk_start in enumerate(starts):
             take = min(chunk_seconds + overlap_seconds, end_limit - chunk_start)
@@ -220,18 +220,18 @@ def run_streaming(
                 break
             t_asr = _now()
             audio = decode_chunk(video_path, chunk_start, take, ffmpeg)
-            segs, _info = wm.transcribe(
+            segs = backend.transcribe(
                 audio,
-                language="zh",
+                language=settings.asr_language or "zh",
                 beam_size=1,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500},
+                vad=True,
                 condition_on_previous_text=False,
                 initial_prompt=settings.asr_prompt or None,
             )
             parts: list[str] = []
             for seg in segs:
-                if i > 0 and seg.start < overlap_seconds:
+                # 云端只回文本时首句可能很长，按 end 判断，避免把整段开头都丢掉
+                if i > 0 and seg.end <= overlap_seconds:
                     continue
                 text = (seg.text or "").strip()
                 if not text:
@@ -367,7 +367,7 @@ def run_streaming(
         "chunks": len(ordered),
         "chunk_seconds": chunk_seconds,
         "overlap_seconds": overlap_seconds,
-        "asr_model": settings.whisper_model,
+        "asr_model": backend_name or settings.whisper_model,
         "llm_model": settings.llm_model,
         "first_token_sec": round(first_token - t0, 3) if first_token else None,
         "stream_duration_sec": round(stream_end - t0, 3),

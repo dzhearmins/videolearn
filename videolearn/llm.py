@@ -30,6 +30,8 @@ DEFAULT_MAX_INPUT_TOKENS = 60000
 CHUNK_MAX_CHARS = 6000
 CHUNK_OVERLAP_CHARS = 400
 MAX_SHOTS_HARD = 20
+# 读超时：本地长课可以用 900 s；远端内测只有一个任务槽，建议 300 s
+LLM_READ_TIMEOUT = float(os.getenv("VIDEOLRN_LLM_TIMEOUT", "900") or 900)
 
 # 本次 run 的上下文事件（截断/调用体积/超限重试），由 pipeline 写入 context_report.json
 CONTEXT_TRACE: list[dict] = []
@@ -306,7 +308,7 @@ def _chat_messages(
             "Content-Type": "application/json",
         },
         json=payload,
-        timeout=(15, 900),
+        timeout=(15, LLM_READ_TIMEOUT),
     )
     if r.status_code != 200:
         detail = ""
